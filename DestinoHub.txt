@@ -1,0 +1,1030 @@
+-- DESTINO HUB : autoparry + espadas/poses + dash cooldown, um painel só
+-- RightShift mostra/esconde | "–" minimiza pra pílula | "X" descarrega tudo
+
+local Workspace     = game:GetService("Workspace")
+local RunService    = game:GetService("RunService")
+local Players       = game:GetService("Players")
+local UIS           = game:GetService("UserInputService")
+local RS            = game:GetService("ReplicatedStorage")
+local VIM           = game:GetService("VirtualInputManager")
+local TweenService  = game:GetService("TweenService")
+local lp            = Players.LocalPlayer
+
+if getgenv().DestinoHub then pcall(getgenv().DestinoHub.Unload) end
+
+local Hub = {alive = true, notify = function() end}
+local conns, drawings = {}, {}
+
+local function bind(sig, fn)
+    local c = sig:Connect(fn)
+    conns[#conns + 1] = c
+    return c
+end
+
+local Cfg = {
+    Parry     = true,
+    Overlay   = true,
+    Debug     = false,
+    Dash      = false,
+    Raio      = 25,
+    Lead      = 0.12,
+    ClickDist = 10,
+    ClickMax  = 40,
+    Smooth    = 0.5,
+    Delay     = 4,
+}
+
+local Parry, Items, Dash = {}, {}, {}
+
+-- ════════════════════════ PARRY ════════════════════════
+do
+    local MESH_ID    = "rbxassetid://15100461919"
+    local MARGEM     = 3
+    local LOCK_GATE  = 12
+    local MIN_MOVE   = 0.2
+    local GATE, GATE_MISS = 16, 3
+    local PERDA      = 90
+    local CLICK_REARM, CLICK_CD = 4, 0.08
+
+    local EV_NAME, EV_WINDOW, EV_RESCAN, EV_RECHECK = "Event", 0.35, 0.5, 0.25
+
+    local cam = Workspace.CurrentCamera
+
+    local function acharAlvo()
+        for _, o in ipairs(Workspace:GetDescendants()) do
+            if o:IsA("MeshPart") and o.MeshId == MESH_ID then return o end
+        end
+    end
+
+    local alvo = acharAlvo()
+    local aparecido = os.clock()
+
+    local frame = 0
+    local buf, prev = {}, {}
+    local pos, vel, ultFrame = nil, Vector3.zero, 0
+    local aceitas, rejeitadas, maxN = 0, 0, 0
+
+    local oldNC; oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        if Hub.alive and Cfg.Parry and alvo and getnamecallmethod() == "BulkMoveTo" and not checkcaller() then
+            local partes, cfs = ...
+            if type(partes) == "table" and type(cfs) == "table" then
+                for i = 1, #partes do
+                    if partes[i] == alvo then
+                        local cf = cfs[i]
+                        if typeof(cf) == "CFrame" then buf[#buf + 1] = cf.Position end
+                    end
+                end
+            end
+        end
+        return oldNC(self, ...)
+    end))
+
+    local function rootPos()
+        local r = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        return r and r.Position
+    end
+
+    local function adquirir()
+        local rp = rootPos()
+        local best, bd = nil, math.huge
+        for _, p in ipairs(buf) do
+            for _, q in ipairs(prev) do
+                local m = (p - q).Magnitude
+                if m >= MIN_MOVE and m <= LOCK_GATE then
+                    local d = rp and (p - rp).Magnitude or 0
+                    if d < bd then best, bd = p, d end
+                end
+            end
+        end
+        if best then
+            pos, vel, ultFrame = best, Vector3.zero, frame
+            aceitas += 1
+        end
+    end
+
+    local function seguir()
+        local df = frame - ultFrame
+        local previsto = pos + vel * df
+        local best, bd = nil, math.huge
+        for _, p in ipairs(buf) do
+            local d = (p - previsto).Magnitude
+            if d < bd then best, bd = p, d end
+        end
+        if best and bd <= GATE + GATE_MISS * math.max(df, 1) then
+            if df > 0 then vel = vel:Lerp((best - pos) / df, Cfg.Smooth) end
+            pos, ultFrame = best, frame
+            aceitas += 1
+        else
+            rejeitadas += 1
+        end
+    end
+
+    local function atualPos()
+        if not pos then return nil end
+        return pos + vel * math.min(frame - ultFrame, 10)
+    end
+
+    bind(UIS.InputBegan, function(i, gp)
+        if not gp and i.KeyCode == Enum.KeyCode.R then
+            pos = nil
+            Hub.notify("relock")
+        end
+    end)
+
+    -- rastreio
+    local dentro, busca, tlog = false, 0, 0
+    bind(RunService.Heartbeat, function(dt)
+        if not Cfg.Parry then
+            if #buf > 0 or #prev > 0 then table.clear(buf) table.clear(prev) end
+            pos = nil
+            return
+        end
+
+        frame += 1
+        maxN = math.max(maxN, #buf)
+
+        if not alvo or not alvo:IsDescendantOf(Workspace) then
+            alvo, pos = nil, nil
+            table.clear(buf) table.clear(prev)
+            busca += dt
+            if busca >= 0.25 then
+                busca = 0
+                alvo = acharAlvo()
+                if alvo then aparecido = os.clock() end
+            end
+            if dentro then dentro = false end
+            return
+        end
+
+        if os.clock() - aparecido < Cfg.Delay then
+            table.clear(buf) table.clear(prev)
+            pos = nil
+            return
+        end
+
+        if #buf > 0 then
+            if pos then seguir() else adquirir() end
+            prev, buf = buf, {}
+        end
+
+        if pos and frame - ultFrame > PERDA then pos = nil end
+
+        tlog += dt
+        if Cfg.Debug and tlog >= 2 then
+            tlog = 0
+            print(("[track] lock=%s aceitas=%d rej=%d maxamostras=%d pos=%s"):format(
+                tostring(pos ~= nil), aceitas, rejeitadas, maxN, tostring(pos)))
+        end
+
+        local rp, atual = rootPos(), atualPos()
+        if not atual or not rp then return end
+        local d = (rp - atual).Magnitude
+        if not dentro and d <= Cfg.Raio then
+            dentro = true
+            if Cfg.Debug then print(("entrou %.1f"):format(d)) end
+        elseif dentro and d > Cfg.Raio + MARGEM then
+            dentro = false
+            if Cfg.Debug then print(("saiu %.1f"):format(d)) end
+        end
+    end)
+
+    -- overlay
+    local dot = Drawing.new("Circle")
+    dot.Radius, dot.Thickness, dot.Filled = 9, 2, false
+    local txt = Drawing.new("Text")
+    txt.Size, txt.Center, txt.Outline, txt.Color = 14, true, true, Color3.new(1, 1, 1)
+    local line = Drawing.new("Line")
+    line.Thickness, line.Color = 1, Color3.fromRGB(255, 60, 60)
+    drawings[#drawings + 1] = dot
+    drawings[#drawings + 1] = txt
+    drawings[#drawings + 1] = line
+
+    bind(RunService.RenderStepped, function()
+        cam = Workspace.CurrentCamera or cam
+        local atual = atualPos()
+        if not (Cfg.Parry and Cfg.Overlay) or not atual then
+            dot.Visible, txt.Visible, line.Visible = false, false, false
+            return
+        end
+
+        local sp, vis = cam:WorldToViewportPoint(atual)
+        dot.Visible, txt.Visible = vis, vis
+        if not vis then line.Visible = false return end
+
+        local p2 = Vector2.new(sp.X, sp.Y)
+        local rp = rootPos()
+        local d = rp and (rp - atual).Magnitude or 0
+        dot.Position, txt.Position = p2, p2 + Vector2.new(0, 16)
+        dot.Color = d <= Cfg.Raio and Color3.fromRGB(255, 220, 60) or Color3.fromRGB(255, 60, 60)
+        txt.Text = ("%.0f"):format(d)
+
+        local fp = cam:WorldToViewportPoint(atual + vel * 15)
+        line.From, line.To, line.Visible = p2, Vector2.new(fp.X, fp.Y), true
+    end)
+
+    -- autoclick / Event
+    local Event, evOk, evChecked = nil, false, 0
+    local windowUntil, lastFire, settling = 0, 0, false
+    local pending  = setmetatable({}, {__mode = "k"})
+    local listened = setmetatable({}, {__mode = "k"})
+
+    local function idnum(obj)
+        return tonumber(obj:GetDebugId():match("_(%d+)")) or 0
+    end
+
+    local function isEvent(obj)
+        return obj.Name == EV_NAME and obj:IsA("BindableEvent")
+    end
+
+    local function listen(obj)
+        if listened[obj] then return end
+        listened[obj] = true
+        bind(obj.Event, function(...)
+            local now = os.clock()
+            if now > windowUntil then return end
+            if now - lastFire < 0.1 then return end
+            if select("#", ...) ~= 0 then return end
+            pending[obj] = true
+        end)
+    end
+
+    local function scan()
+        for _, obj in getnilinstances() do
+            if isEvent(obj) then listen(obj) end
+        end
+    end
+
+    task.spawn(function()
+        while Hub.alive do
+            scan()
+            task.wait(EV_RESCAN)
+        end
+    end)
+
+    local function settle()
+        settling = false
+        local best, bestId
+        for obj in pending do
+            local n = idnum(obj)
+            if not bestId or n < bestId then best, bestId = obj, n end
+        end
+        table.clear(pending)
+        if best then
+            Event, evOk, evChecked = best, true, os.clock()
+            Hub.notify("Event capturado")
+        end
+    end
+
+    local function openWindow()
+        if settling then return end
+        settling = true
+        windowUntil = os.clock() + EV_WINDOW
+        scan()
+        task.delay(EV_WINDOW + 0.05, settle)
+    end
+
+    local function evAlive(now)
+        if not Event then return false end
+        if now - evChecked >= EV_RECHECK then
+            evChecked = now
+            local ok, c = pcall(getconnections, Event.Event)
+            evOk = ok and #c > 0
+        end
+        return evOk
+    end
+
+    local function cliqueReal()
+        if mouse1click then
+            mouse1click()
+        else
+            local m = UIS:GetMouseLocation()
+            VIM:SendMouseButtonEvent(m.X, m.Y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(m.X, m.Y, 0, false, game, 0)
+        end
+    end
+
+    local function aprender(espera)
+        task.wait(espera)
+        for _ = 1, 3 do
+            if not Hub.alive or evAlive(os.clock()) then break end
+            openWindow()
+            task.wait(0.05)
+            cliqueReal()
+            task.wait(EV_WINDOW + 0.3)
+        end
+    end
+    task.spawn(aprender, 1)
+
+    local function disparar()
+        local now = os.clock()
+        if not evAlive(now) then return false end
+        lastFire = now
+        if pcall(Event.Fire, Event) then return true end
+        evOk = false
+        return false
+    end
+
+    bind(UIS.InputBegan, function(input, gpe)
+        if gpe then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then openWindow() end
+    end)
+
+    local function ehVermelho(c)
+        return c.R > 0.6 and c.G < 0.35 and c.B < 0.35
+    end
+
+    local function bolaVermelha()
+        if not alvo then return false end
+        if ehVermelho(alvo.Color) then return true end
+        for _, o in ipairs(alvo:GetChildren()) do
+            if o:IsA("Highlight") and (ehVermelho(o.FillColor) or ehVermelho(o.OutlineColor)) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local armado, ultClick, tdbg = true, 0, 0
+
+    bind(RunService.Heartbeat, function(dt)
+        if not Cfg.Parry then armado = true return end
+        local rp, atual = rootPos(), atualPos()
+        if not alvo or not rp or not atual then armado = true return end
+
+        local agora    = os.clock()
+        local d        = (rp - atual).Magnitude
+        local vermelha = bolaVermelha()
+
+        if not vermelha then armado = true end
+
+        local vs = vel.Magnitude / math.max(dt, 1 / 240)
+        local gatilho = vs * Cfg.Lead
+        if gatilho ~= gatilho or gatilho == math.huge then gatilho = Cfg.ClickDist end
+        gatilho = math.clamp(gatilho, Cfg.ClickDist, Cfg.ClickMax)
+
+        if vermelha and d <= gatilho and armado and agora - ultClick >= CLICK_CD then
+            if disparar() then armado, ultClick = false, agora end
+        elseif vermelha and d > gatilho + CLICK_REARM then
+            armado = true
+        end
+
+        if Cfg.Debug and vermelha and d <= gatilho + 5 and agora - tdbg > 1 then
+            tdbg = agora
+            print(("[parry] d=%.1f gat=%.1f armado=%s event=%s"):format(
+                d, gatilho, tostring(armado), tostring(evAlive(agora))))
+        end
+    end)
+
+    function Parry.Relock() pos = nil Hub.notify("relock") end
+    function Parry.Relearn()
+        Event, evOk = nil, false
+        Hub.notify("aprendendo Event...")
+        task.spawn(aprender, 0)
+    end
+    function Parry.Stats()
+        local rp, atual = rootPos(), atualPos()
+        local d = (rp and atual) and (rp - atual).Magnitude or nil
+        return {
+            lock = pos ~= nil, aceitas = aceitas, rej = rejeitadas, dist = d,
+            alvo = alvo ~= nil, event = evAlive(os.clock()),
+        }
+    end
+end
+
+-- ════════════════════════ ESPADAS / POSES ════════════════════════
+do
+    local NOME_PART = "Sword"
+    local SPEED, FADE = 1, 0.25
+    local espadaAtual, poseAtual = "Default Katana", "14366558676"
+
+    local POSES = {}
+    for nome, id in ([[
+Pose Lancer=110923619778641
+Pose Double=134465215945764
+Pose Deadeye=107472819159822
+Pose Assassin=89036364216667
+Pose Titan=119995250829477
+Pose Bow=134871145546141
+Pose Crowned=81912651341666
+Pose Cyclone=110856068497817
+Pose Dragon Bone=134826197879168
+Pose Battle Fan=125321512005022
+Pose Gunslinger=122157935116009
+Pose Glory=105882656977941
+Pose Override=116659101954482
+Pose Jinter=105642490152003
+Pose Headoff=92610628646824
+Pose I´m Fine=118905422471560
+Pose Kunai=140546634576024
+Pose Overclock=130120910247533
+Pose Phantom=100133999614066
+Pose Protector=89081343189332
+Pose Primed=90758680109826
+Pose Prepared=130730419694293
+Pose Ready=96196133982875
+Pose Razor=78104324419285
+Pose Resilient=96839562819687
+Pose Resolute=73160247677216
+Pose Rogue=85748987048117
+Pose Serenity=75901848188552
+Pose Skyrest=74775764836169
+Pose Single Balance=135170684332974
+Pose Stand=136283773286547
+Pose Airsurf=104630022144108
+Pose Whirlcut=105430662836754
+Pose Twinreapers Dance=91656817886927
+Pose UpGuard=111087575345218
+Pose Watchpoint=97843254788567
+Pose Nichi=136113251221817
+Amethyst Oblivion (Stillblade)=119500026771543
+Anomaly Core (The Anomaly)=71677930604051
+Atomizer (Slayer)=90015268348398
+Celestis Judgement (Unfazed)=109927675345299
+CHIKINN (Embrace)=133430388963671
+Colossal Blazehead / Nutcracker (Reckless)=72687029812902
+Colossus (Earthsplitter)=122720077168326
+Crystal Dahlia (Gracebound)=101260218070479
+Cursed Spirit Blade (Cursed)=81397585866097
+Cyber Hammer (Pendrath)=87908265715361
+Darkness (Valor)=114000723314578
+Demonic Hellfire Axe (Furor)=72864564191348
+Devotion (Devoted)=136011922091195
+Diamond Aegis (Authority)=103774174418553
+Diamond Iliaria (Core)=104499372146425
+Diamond Inception (Sovereign)=129666347523072
+Diamond Shardblade (Vanguard)=91399146291195
+Divine Shadow (Laid Back)=88936098358011
+Divine Slayer (Vigor)=81771694109528
+Divine Shredder (Ardent)=72970239391978
+Dragonheart (Focus)=112055456045140
+Eclipse III (Tenancity)=109176244465538
+Eclipse IV (Courage)=103813800399301
+Elion Tri Scythe (Linger)=88665111847510
+Enigma (Backlash)=129749275204772
+Ethereal Tear (Skyreap)=138128968682473
+Fallen Aphelion (Driftfall)=127759940152102
+Firewall Crusher (Berserker)=124163086813520
+Gemblade (Stable)=104267134930973
+Glassbreaker (Standby)=86739684968410
+Heaven Wing (Reverie)=126128864561117
+Inferno Blade (Overdrive)=130723084220183
+Leviathan Judicator (Overrule)=88442957566534
+Lotus Oblivion (Stallsword)=121311442161868
+Lovecraft Lullaby (Stagnance)=121983084407507
+Lumina (Resonance)=127737225023101
+Nexar (Tsurudachi)=103206435105305
+Okiro (Ravager)=79396419454628
+Olimpus Sword (Last Oath)=120050312411424
+Olympus Edge (Chivalry)=79755806780087
+Pink Pearl Sword (Resolve)=82681602878663
+Soulpiercer (Backdraw)=110171545865425
+Soulblade (Soul Step)=79532572333940
+Spirit Scythe (Steady)=78019762264926
+Split Intention (Reign)=105265263387158
+Statue's Demise (Downfall)=102533643980037
+Tri Heat Scythe (Strike Form)=102823616876535
+Uzi (Firehold)=129848892099896
+Void Spear (Seijaku)=103694495076299
+War Forged Reaper (Locked On)=113707332291807
+Whirlwind Scythe (Unbothered)=131182633830171
+Wrath Blade (BackStab)=127249925577745
+Idle=14366558676
+]]):gmatch("([^=\n]+)=(%d+)") do table.insert(POSES, {nome, id}) end
+
+    local ESPADAS, vistos = {}, {}
+    for _, d in ipairs(RS:GetDescendants()) do
+        if d.Name == NOME_PART and d:IsA("BasePart") and d.Parent ~= RS and not vistos[d.Parent.Name] then
+            vistos[d.Parent.Name] = true
+            table.insert(ESPADAS, d.Parent.Name)
+        end
+    end
+    table.sort(ESPADAS)
+
+    local equipado, sword, track, aconns, sessaoAnim = false, nil, nil, {}, 0
+
+    Items.ESPADAS, Items.POSES = ESPADAS, POSES
+    Items.changed = function() end
+
+    local function limparAnim()
+        sessaoAnim += 1
+        for _, c in ipairs(aconns) do c:Disconnect() end
+        aconns = {}
+        if track then pcall(function() track:Stop(FADE) track:Destroy() end) track = nil end
+    end
+
+    local function limparEspada()
+        if sword then sword:Destroy() sword = nil end
+        local p = Workspace:FindFirstChild(lp.Name .. " SwordWelds")
+        if p then p:ClearAllChildren() end
+    end
+
+    local function colocarEspada()
+        limparEspada()
+        local char = lp.Character
+        local rtool = char and char:FindFirstChild("rtool")
+        local rpart = rtool and (rtool:IsA("BasePart") and rtool or rtool:FindFirstChildWhichIsA("BasePart"))
+        if not rpart then Hub.notify("rtool não encontrado") return end
+
+        local objeto = RS:FindFirstChild(espadaAtual, true)
+        local orig = objeto and objeto:FindFirstChild(NOME_PART, true)
+        if not orig then Hub.notify("'" .. espadaAtual .. "' não encontrada") return end
+
+        local cf = CFrame.new()
+        local off = objeto:FindFirstChild("Offset")
+        if off and off:IsA("CFrameValue") then cf = off.Value
+        elseif off and off:IsA("Vector3Value") then cf = CFrame.new(off.Value)
+        else
+            local function n(nm) local v = objeto:FindFirstChild(nm) return (v and v:IsA("NumberValue")) and v.Value or 0 end
+            cf = CFrame.new(n("OffsetX"), n("OffsetY"), n("OffsetZ"))
+        end
+
+        local nomePasta = lp.Name .. " SwordWelds"
+        local pasta = Workspace:FindFirstChild(nomePasta)
+        if not pasta then
+            pasta = Instance.new("Folder")
+            pasta.Name = nomePasta
+            pasta.Parent = Workspace
+        end
+
+        sword = orig:Clone()
+        sword.Anchored = false
+        sword.CanCollide = false
+        sword.Parent = pasta
+        sword.CFrame = rpart.CFrame * cf
+
+        local weld = Instance.new("WeldConstraint")
+        weld.Part0, weld.Part1, weld.Parent = rpart, sword, sword
+        return true
+    end
+
+    local function tocarPose()
+        limparAnim()
+        local meu = sessaoAnim
+        local char = lp.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local animator = hum and hum:FindFirstChildOfClass("Animator")
+        if not animator then return end
+
+        for _, t in ipairs(animator:GetPlayingAnimationTracks()) do pcall(function() t:Stop(0) end) end
+        task.wait(0.1)
+        if not equipado or sessaoAnim ~= meu then return end
+
+        local a = Instance.new("Animation")
+        a.AnimationId = "rbxassetid://" .. poseAtual
+        local ok, t = pcall(function() return animator:LoadAnimation(a) end)
+        a:Destroy()
+        if not ok or not t then Hub.notify("falha ao carregar pose " .. poseAtual) return end
+
+        t.Looped, t.Priority = true, Enum.AnimationPriority.Idle
+        t:AdjustSpeed(SPEED)
+        track = t
+
+        local pulando = false
+        table.insert(aconns, hum.Running:Connect(function(speed)
+            if speed > 0 then
+                if t.IsPlaying then t:Stop(FADE) end
+            elseif not pulando and not t.IsPlaying then
+                t:Play(FADE) t:AdjustSpeed(SPEED)
+            end
+        end))
+        table.insert(aconns, hum.StateChanged:Connect(function(_, s)
+            if s == Enum.HumanoidStateType.Jumping or s == Enum.HumanoidStateType.Freefall then
+                pulando = true
+            elseif s == Enum.HumanoidStateType.Running or s == Enum.HumanoidStateType.RunningNoPhysics then
+                pulando = false
+                task.defer(function()
+                    if track == t and hum.MoveDirection.Magnitude == 0 and not t.IsPlaying then
+                        t:Play(FADE) t:AdjustSpeed(SPEED)
+                    end
+                end)
+            end
+        end))
+        t:Play(FADE)
+    end
+
+    local function desequipar()
+        equipado = false
+        limparAnim()
+        limparEspada()
+        Items.changed()
+    end
+
+    local function equipar()
+        if not colocarEspada() then return end
+        equipado = true
+        Items.changed()
+        tocarPose()
+    end
+
+    bind(lp.CharacterAdded, desequipar)
+
+    function Items.Toggle() if equipado then desequipar() else equipar() end end
+    function Items.Unequip() desequipar() end
+    function Items.SetSword(nome)
+        espadaAtual = nome
+        if equipado then colocarEspada() end
+        Items.changed()
+    end
+    function Items.SetPose(id)
+        poseAtual = id
+        if equipado then task.spawn(tocarPose) end
+        Items.changed()
+    end
+    function Items.Has(nome) return RS:FindFirstChild(nome, true) ~= nil end
+    function Items.equipado() return equipado end
+    function Items.espadaAtual() return espadaAtual end
+    function Items.poseAtual() return poseAtual end
+end
+
+-- ════════════════════════ DASH ════════════════════════
+do
+    function Dash.Scan()
+        local n = 0
+        for _, v in next, getgc(true) do
+            if type(v) == "table" then
+                for k, val in next, v do
+                    if type(k) == "string" and k:lower():find("cooldown") and type(val) == "number" then
+                        print("[cd]", k, val, v)
+                        n += 1
+                    end
+                end
+            end
+        end
+        for k, v in next, lp:GetAttributes() do
+            if tostring(k):lower():find("cooldown") then print("[attr]", k, v) n += 1 end
+        end
+        return n
+    end
+
+    function Dash.Patch()
+        local n = 0
+        for _, t in next, getgc(true) do
+            if type(t) == "table" then
+                if rawget(t, "DASH_COOLDOWN_TIME") ~= nil then
+                    rawset(t, "DASH_COOLDOWN_TIME", 0)
+                    rawset(t, "DEFLECT_COOLDOWN_TIME", 0)
+                    n += 1
+                end
+                local d = rawget(t, "DashCooldown")
+                if d == 0.7 then rawset(t, "DashCooldown", 0) n += 1 end
+                local c = rawget(t, "CooldownDuration")
+                if c == 0.7 or c == 1.3 then rawset(t, "CooldownDuration", 0) n += 1 end
+            end
+        end
+        return n
+    end
+
+    task.spawn(function()
+        while Hub.alive do
+            task.wait(5)
+            if Cfg.Dash then Dash.lastN = Dash.Patch() end
+        end
+    end)
+end
+
+-- ════════════════════════ HUD ════════════════════════
+local T = {
+    bg     = Color3.fromRGB(14, 14, 20),
+    panel  = Color3.fromRGB(22, 22, 30),
+    item   = Color3.fromRGB(32, 32, 44),
+    hover  = Color3.fromRGB(42, 42, 58),
+    accent = Color3.fromRGB(124, 92, 255),
+    accent2= Color3.fromRGB(70, 160, 255),
+    text   = Color3.fromRGB(236, 236, 246),
+    dim    = Color3.fromRGB(150, 150, 172),
+    red    = Color3.fromRGB(220, 70, 80),
+}
+
+local function mk(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    o.Parent = parent
+    return o
+end
+local function corner(o, r) mk("UICorner", {CornerRadius = UDim.new(0, r or 8)}, o) end
+local function tween(o, props, t) TweenService:Create(o, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad), props):Play() end
+
+local gui = mk("ScreenGui", {Name = "DestinoHub", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling},
+    (gethui and gethui()) or lp:WaitForChild("PlayerGui"))
+
+local main = mk("Frame", {Size = UDim2.fromOffset(540, 400), Position = UDim2.new(0.5, -270, 0.5, -200),
+    BackgroundColor3 = T.bg, BorderSizePixel = 0, ClipsDescendants = true}, gui)
+corner(main, 12)
+mk("UIStroke", {Color = T.accent, Transparency = 0.55, Thickness = 1.2}, main)
+
+-- topbar
+local top = mk("Frame", {Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = T.panel, BorderSizePixel = 0}, main)
+mk("UIGradient", {Color = ColorSequence.new(T.panel, Color3.fromRGB(30, 24, 52)), Rotation = 0}, top)
+mk("TextLabel", {BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 0), Size = UDim2.new(0.6, 0, 1, 0),
+    Text = "DESTINO  HUB", TextColor3 = T.text, Font = Enum.Font.GothamBlack, TextSize = 15,
+    TextXAlignment = Enum.TextXAlignment.Left}, top)
+
+local function topBtn(text, x, color)
+    local b = mk("TextButton", {Size = UDim2.fromOffset(28, 24), Position = UDim2.new(1, x, 0.5, -12),
+        BackgroundColor3 = color or T.item, Text = text, TextColor3 = T.text, Font = Enum.Font.GothamBold,
+        TextSize = 14, AutoButtonColor = true}, top)
+    corner(b, 6)
+    return b
+end
+local btnMin = topBtn("–", -70)
+local btnX   = topBtn("X", -36, T.red)
+
+-- pílula (minimizado)
+local pill = mk("TextButton", {Size = UDim2.fromOffset(110, 28), Position = UDim2.new(0.5, -55, 0, 8),
+    BackgroundColor3 = T.panel, Text = "DESTINO", TextColor3 = T.text, Font = Enum.Font.GothamBold, TextSize = 13,
+    Visible = false}, gui)
+corner(pill, 14)
+mk("UIStroke", {Color = T.accent, Transparency = 0.4}, pill)
+
+local function setVisible(v)
+    main.Visible = v
+    pill.Visible = not v
+end
+btnMin.MouseButton1Click:Connect(function() setVisible(false) end)
+pill.MouseButton1Click:Connect(function() setVisible(true) end)
+bind(UIS.InputBegan, function(i, gp)
+    if not gp and i.KeyCode == Enum.KeyCode.RightShift then setVisible(not main.Visible) end
+end)
+
+-- drag
+do
+    local dragging, ds, sp
+    top.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, ds, sp = true, i.Position, main.Position
+        end
+    end)
+    bind(UIS.InputChanged, function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - ds
+            main.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+        end
+    end)
+    bind(UIS.InputEnded, function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- status bar
+local status = mk("TextLabel", {Size = UDim2.new(1, -24, 0, 22), Position = UDim2.new(0, 12, 1, -26),
+    BackgroundTransparency = 1, Text = "pronto", TextColor3 = T.dim, Font = Enum.Font.Gotham, TextSize = 12,
+    TextXAlignment = Enum.TextXAlignment.Left}, main)
+Hub.notify = function(t) status.Text = tostring(t) end
+
+-- sidebar + páginas
+local side = mk("Frame", {Size = UDim2.new(0, 120, 1, -72), Position = UDim2.fromOffset(8, 48),
+    BackgroundTransparency = 1}, main)
+mk("UIListLayout", {Padding = UDim.new(0, 6)}, side)
+
+local holder = mk("Frame", {Size = UDim2.new(1, -144, 1, -72), Position = UDim2.fromOffset(136, 48),
+    BackgroundTransparency = 1}, main)
+
+local pages, tabBtns = {}, {}
+local function showPage(name)
+    for n, p in pairs(pages) do p.Visible = (n == name) end
+    for n, b in pairs(tabBtns) do
+        tween(b, {BackgroundColor3 = (n == name) and T.accent or T.item})
+        b.TextColor3 = (n == name) and Color3.new(1, 1, 1) or T.dim
+    end
+end
+
+local function newPage(name, scroll)
+    local btn = mk("TextButton", {Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = T.item, Text = name,
+        TextColor3 = T.dim, Font = Enum.Font.GothamBold, TextSize = 13, AutoButtonColor = false}, side)
+    corner(btn, 8)
+    tabBtns[name] = btn
+
+    local pg
+    if scroll then
+        pg = mk("ScrollingFrame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 3, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(),
+            Visible = false}, holder)
+        mk("UIListLayout", {Padding = UDim.new(0, 6)}, pg)
+    else
+        pg = mk("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false}, holder)
+    end
+    pages[name] = pg
+    btn.MouseButton1Click:Connect(function() showPage(name) end)
+    return pg
+end
+
+-- componentes
+local function toggle(par, label, key, cb)
+    local row = mk("TextButton", {Size = UDim2.new(1, -6, 0, 36), BackgroundColor3 = T.item, Text = "",
+        AutoButtonColor = false}, par)
+    corner(row)
+    mk("TextLabel", {BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -70, 1, 0),
+        Text = label, TextColor3 = T.text, Font = Enum.Font.Gotham, TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left}, row)
+    local sw = mk("Frame", {Size = UDim2.fromOffset(40, 20), Position = UDim2.new(1, -52, 0.5, -10),
+        BackgroundColor3 = T.panel}, row)
+    corner(sw, 10)
+    local knob = mk("Frame", {Size = UDim2.fromOffset(16, 16), Position = UDim2.fromOffset(2, 2),
+        BackgroundColor3 = T.text}, sw)
+    corner(knob, 8)
+    local function paint()
+        local on = Cfg[key]
+        tween(sw, {BackgroundColor3 = on and T.accent or T.panel})
+        tween(knob, {Position = on and UDim2.fromOffset(22, 2) or UDim2.fromOffset(2, 2)})
+    end
+    row.MouseButton1Click:Connect(function()
+        Cfg[key] = not Cfg[key]
+        paint()
+        if cb then cb(Cfg[key]) end
+    end)
+    paint()
+end
+
+local function slider(par, label, key, min, max, step, fmt)
+    local row = mk("Frame", {Size = UDim2.new(1, -6, 0, 46), BackgroundColor3 = T.item}, par)
+    corner(row)
+    local lab = mk("TextLabel", {BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 4),
+        Size = UDim2.new(1, -24, 0, 18), Text = "", TextColor3 = T.text, Font = Enum.Font.Gotham, TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left}, row)
+    local track = mk("Frame", {Size = UDim2.new(1, -24, 0, 6), Position = UDim2.new(0, 12, 0, 32),
+        BackgroundColor3 = T.panel}, row)
+    corner(track, 3)
+    local fill = mk("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = T.accent}, track)
+    corner(fill, 3)
+    mk("UIGradient", {Color = ColorSequence.new(T.accent, T.accent2)}, fill)
+
+    local function refresh()
+        fill.Size = UDim2.fromScale(math.clamp((Cfg[key] - min) / (max - min), 0, 1), 1)
+        lab.Text = label .. ":  " .. string.format(fmt, Cfg[key])
+    end
+    local dragging = false
+    local function set(x)
+        local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+        Cfg[key] = math.floor((min + a * (max - min)) / step + 0.5) * step
+        refresh()
+    end
+    row.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            set(i.Position.X)
+        end
+    end)
+    bind(UIS.InputChanged, function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            set(i.Position.X)
+        end
+    end)
+    bind(UIS.InputEnded, function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    refresh()
+end
+
+local function button(par, text, cb, color)
+    local b = mk("TextButton", {Size = UDim2.new(1, -6, 0, 34), BackgroundColor3 = color or T.item, Text = text,
+        TextColor3 = T.text, Font = Enum.Font.GothamBold, TextSize = 13}, par)
+    corner(b)
+    b.MouseButton1Click:Connect(cb)
+    return b
+end
+
+local function infoLabel(par, text, h)
+    return mk("TextLabel", {Size = UDim2.new(1, -6, 0, h or 40), BackgroundColor3 = T.panel, Text = text,
+        TextColor3 = T.dim, Font = Enum.Font.Code, TextSize = 12, TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top}, par)
+end
+
+-- ── página: Parry
+local pgParry = newPage("Parry", true)
+toggle(pgParry, "Auto Parry", "Parry")
+toggle(pgParry, "Overlay (bola / distância)", "Overlay")
+local parryInfo = infoLabel(pgParry, "...", 56)
+corner(parryInfo)
+mk("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingTop = UDim.new(0, 6)}, parryInfo)
+slider(pgParry, "Raio", "Raio", 10, 60, 1, "%d studs")
+slider(pgParry, "Antecipação (lead)", "Lead", 0.02, 0.4, 0.01, "%.2f s")
+slider(pgParry, "Gatilho mínimo", "ClickDist", 4, 30, 1, "%d studs")
+slider(pgParry, "Gatilho máximo", "ClickMax", 20, 80, 1, "%d studs")
+slider(pgParry, "Suavização", "Smooth", 0.1, 1, 0.05, "%.2f")
+slider(pgParry, "Espera da bola", "Delay", 0, 8, 0.5, "%.1f s")
+button(pgParry, "Relock  (R)", Parry.Relock)
+button(pgParry, "Reaprender Event", Parry.Relearn)
+
+-- ── página: Itens
+local pgItens = newPage("Itens", false)
+local sub = "Espadas"
+
+local tE = mk("TextButton", {Size = UDim2.new(0.3, -4, 0, 30), Position = UDim2.fromOffset(0, 0), Text = "Espadas",
+    TextColor3 = T.text, Font = Enum.Font.GothamBold, TextSize = 13, BackgroundColor3 = T.item}, pgItens)
+local tP = mk("TextButton", {Size = UDim2.new(0.3, -4, 0, 30), Position = UDim2.new(0.3, 0, 0, 0), Text = "Poses",
+    TextColor3 = T.text, Font = Enum.Font.GothamBold, TextSize = 13, BackgroundColor3 = T.item}, pgItens)
+local equipBtn = mk("TextButton", {Size = UDim2.new(0.4, -4, 0, 30), Position = UDim2.new(0.6, 4, 0, 0), Text = "",
+    TextColor3 = T.text, Font = Enum.Font.GothamBold, TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd,
+    BackgroundColor3 = T.item}, pgItens)
+local busca = mk("TextBox", {Size = UDim2.new(1, -6, 0, 28), Position = UDim2.fromOffset(0, 36), BackgroundColor3 = T.item,
+    TextColor3 = T.text, PlaceholderText = "Buscar... (Enter usa o nome digitado)", PlaceholderColor3 = T.dim,
+    Text = "", ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 13}, pgItens)
+local lista = mk("ScrollingFrame", {Size = UDim2.new(1, -6, 1, -70), Position = UDim2.fromOffset(0, 70),
+    BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+    AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new()}, pgItens)
+mk("UIListLayout", {Padding = UDim.new(0, 3)}, lista)
+for _, o in ipairs({tE, tP, equipBtn, busca}) do corner(o, 6) end
+
+local function renderItens()
+    equipBtn.Text = (Items.equipado() and "■ " or "▶ ") .. Items.espadaAtual()
+    equipBtn.BackgroundColor3 = Items.equipado() and Color3.fromRGB(0, 140, 70) or T.item
+    tE.BackgroundColor3 = sub == "Espadas" and T.accent or T.item
+    tP.BackgroundColor3 = sub == "Poses" and T.accent or T.item
+
+    for _, c in ipairs(lista:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+    local q = busca.Text:lower()
+    for _, item in ipairs(sub == "Espadas" and Items.ESPADAS or Items.POSES) do
+        local nome, id = item, nil
+        if type(item) == "table" then nome, id = item[1], item[2] end
+        if q == "" or nome:lower():find(q, 1, true) then
+            local sel = id and id == Items.poseAtual() or (not id and nome == Items.espadaAtual())
+            local b = mk("TextButton", {Size = UDim2.new(1, -6, 0, 26), BackgroundColor3 = sel and T.accent or T.item,
+                TextColor3 = T.text, Text = "  " .. nome, TextXAlignment = Enum.TextXAlignment.Left,
+                Font = Enum.Font.Gotham, TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd}, lista)
+            corner(b, 6)
+            b.MouseButton1Click:Connect(function()
+                if id then Items.SetPose(id) else Items.SetSword(nome) end
+            end)
+        end
+    end
+end
+Items.changed = renderItens
+
+tE.MouseButton1Click:Connect(function() sub = "Espadas" renderItens() end)
+tP.MouseButton1Click:Connect(function() sub = "Poses" renderItens() end)
+equipBtn.MouseButton1Click:Connect(Items.Toggle)
+busca:GetPropertyChangedSignal("Text"):Connect(renderItens)
+busca.FocusLost:Connect(function(enter)
+    if enter and sub == "Espadas" and busca.Text ~= "" and Items.Has(busca.Text) then
+        Items.SetSword(busca.Text)
+    end
+end)
+
+-- ── página: Dash
+local pgDash = newPage("Dash", true)
+local dashInfo = infoLabel(pgDash, "cooldown patch: off", 40)
+mk("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingTop = UDim.new(0, 6)}, dashInfo)
+corner(dashInfo)
+toggle(pgDash, "Dash sem cooldown (repatch a cada 5s)", "Dash", function(on)
+    if on then
+        task.spawn(function()
+            local n = Dash.Patch()
+            Dash.lastN = n
+            Hub.notify(("dash: %d tabelas patchadas"):format(n))
+        end)
+    end
+end)
+button(pgDash, "Aplicar patch agora", function()
+    task.spawn(function()
+        local n = Dash.Patch()
+        Dash.lastN = n
+        Hub.notify(("dash: %d tabelas patchadas"):format(n))
+    end)
+end)
+button(pgDash, "Scan de cooldown (saída no console)", function()
+    task.spawn(function()
+        local n = Dash.Scan()
+        Hub.notify(("scan: %d entradas, ver F9"):format(n))
+    end)
+end)
+
+-- ── página: Config
+local pgCfg = newPage("Config", true)
+toggle(pgCfg, "Debug (prints no console)", "Debug")
+local keys = infoLabel(pgCfg, "RightShift  mostrar / esconder\nR  relock do parry\n–  minimizar pra pílula", 56)
+mk("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingTop = UDim.new(0, 6)}, keys)
+corner(keys)
+button(pgCfg, "Descarregar tudo", function() Hub.Unload() end, T.red)
+
+-- loop de stats
+task.spawn(function()
+    while Hub.alive do
+        local s = Parry.Stats()
+        parryInfo.Text = ("alvo=%s  lock=%s  event=%s\naceitas=%d  rej=%d\ndist=%s"):format(
+            s.alvo and "ok" or "--", s.lock and "ok" or "--", s.event and "ok" or "--",
+            s.aceitas, s.rej, s.dist and ("%.1f"):format(s.dist) or "--")
+        dashInfo.Text = ("patch: %s\nultima passada: %s tabelas"):format(
+            Cfg.Dash and "on" or "off", tostring(Dash.lastN or 0))
+        task.wait(0.3)
+    end
+end)
+
+-- unload
+function Hub.Unload()
+    Hub.alive = false
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    for _, d in ipairs(drawings) do pcall(function() d:Remove() end) end
+    pcall(Items.Unequip)
+    pcall(function() gui:Destroy() end)
+    getgenv().DestinoHub = nil
+end
+btnX.MouseButton1Click:Connect(function() Hub.Unload() end)
+
+getgenv().DestinoHub = Hub
+showPage("Parry")
+renderItens()
+Hub.notify("pronto")
