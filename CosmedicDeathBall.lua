@@ -899,7 +899,6 @@ local estilo3 = false
 local POSES = {}
 for nome, id in ([[
 Pose Assassin=89036364216667
-Pose Apocalyptic=100792109355042
 Pose Bow=134871145546141
 Pose Crowned=81912651341666
 Pose Cyclone=110856068497817
@@ -936,8 +935,10 @@ Pose Twinreapers Dance=91656817886927
 Pose UpGuard=111087575345218
 Pose Watchpoint=97843254788567
 Pose Nichi=136113251221817
+Pose Ghoul=105677255521285
 Amethyst Oblivion (Stillblade)=119500026771543
 Anomaly Core (The Anomaly)=71677930604051
+Apocalypse (Apocalyptic)=100792109355042
 Atomizer (Slayer)=90015268348398
 Celestis Judgement (Unfazed)=109927675345299
 CHIKINN (Embrace)=133430388963671
@@ -948,6 +949,7 @@ Cursed Spirit Blade (Cursed)=81397585866097
 Cyber Hammer (Pendrath)=87908265715361
 Darkness (Valor)=114000723314578
 Demonic Hellfire Axe (Furor)=72864564191348
+Demonic Shadow (Unyielding)=94975658444234
 Devotion (Devoted)=136011922091195
 Diamond Aegis (Authority)=103774174418553
 Diamond Iliaria (Core)=104499372146425
@@ -978,6 +980,7 @@ Olimpus Sword (Last Oath)=120050312411424
 Olympus Edge (Chivalry)=79755806780087
 Pink Pearl Sword (Resolve)=82681602878663
 Scission (Rupture)=102538281764016
+Skinwalker (Lifeless)=97363127926583
 Soulpiercer (Backdraw)=110171545865425
 Soulblade (Soul Step)=79532572333940
 Spirit Scythe (Steady)=78019762264926
@@ -1343,6 +1346,178 @@ local cVigiaDefl = game:GetService("RunService").Heartbeat:Connect(function()
     end
 end)
 
+-- ══ pose fixa na espada real R (SwordWelds, por UniqueId) ══
+local posesEsp = {}       -- [uid@nome da espada R] = id da pose
+local espChave            -- "uid@nome:pose" atualmente aplicada
+local espTrack, espConns, espSessao = nil, {}, 0
+local espVivo = true
+
+local function uidDe(i)
+    local ok, v = pcall(function() return gethiddenproperty and gethiddenproperty(i, "UniqueId") end)
+    if ok and v ~= nil then return tostring(v) end
+    ok, v = pcall(function() return i.UniqueId end)
+    if ok and v ~= nil then return tostring(v) end
+end
+
+-- true se a part está soldada na rtool
+local function soldadaNaR(part)
+    local okJ, juntas = pcall(function() return part:GetJoints() end)
+    if okJ then
+        for _, j in ipairs(juntas) do
+            local outro = (j.Part0 == part) and j.Part1 or j.Part0
+            if outro and (outro.Name:lower() == PARTES.R or (outro.Parent and outro.Parent.Name:lower() == PARTES.R)) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function visivelEsp(c)
+    if c:IsA("BasePart") and c.Transparency < 0.99 then return true end
+    for _, d in ipairs(c:GetDescendants()) do
+        if d:IsA("BasePart") and d.Transparency < 0.99 then return true end
+    end
+    return false
+end
+
+-- chave da espada R real: só considera espada visível; sem fallback pra espada escondida
+local function uidR()
+    local pasta = workspace:FindFirstChild(plr.Name .. " SwordWelds")
+    if not pasta then return end
+    local cands = {}
+    for _, c in ipairs(pasta:GetChildren()) do
+        if not ehMeu(c) and visivelEsp(c) then
+            local s = c
+            if not c:IsA("BasePart") then
+                s = c:FindFirstChild(NOME_PART, true) or c:FindFirstChildWhichIsA("BasePart", true)
+            end
+            if s and s:IsA("BasePart") then table.insert(cands, {c = c, s = s}) end
+        end
+    end
+    if #cands == 0 then return end
+
+    -- UniqueId vem zerado no client, então a chave é uma assinatura: nome + MeshIds/TextureIds da espada
+    local function chave(x)
+        local ids = {}
+        local function coleta(o)
+            local okM, mesh = pcall(function()
+                if o:IsA("MeshPart") or o:IsA("SpecialMesh") then return o.MeshId end
+            end)
+            if okM and mesh and mesh ~= "" then table.insert(ids, mesh) end
+            local okT, tex = pcall(function()
+                if o:IsA("MeshPart") then return o.TextureID end
+                if o:IsA("SpecialMesh") then return o.TextureId end
+            end)
+            if okT and tex and tex ~= "" then table.insert(ids, tex) end
+        end
+        coleta(x.c)
+        for _, d in ipairs(x.c:GetDescendants()) do coleta(d) end
+        table.sort(ids)
+        return x.c.Name .. "#" .. table.concat(ids, "|")
+    end
+
+    for _, x in ipairs(cands) do -- 1) soldada na rtool
+        local parts = {x.s}
+        for _, d in ipairs(x.c:GetDescendants()) do if d:IsA("BasePart") then table.insert(parts, d) end end
+        for _, p in ipairs(parts) do
+            if soldadaNaR(p) then return chave(x) end
+        end
+    end
+    for _, x in ipairs(cands) do -- 2) visível e não é Dual
+        if not x.c:FindFirstChild(NOME_DUAL, true) then return chave(x) end
+    end
+end
+
+local function pararPoseEsp()
+    espSessao += 1
+    for _, c in ipairs(espConns) do c:Disconnect() end
+    espConns = {}
+    if espTrack then pcall(function() espTrack:Stop(FADE) espTrack:Destroy() end) espTrack = nil end
+end
+
+local function tocarPoseEsp(id)
+    pararPoseEsp()
+    local meu = espSessao
+    local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+    local animator = hum and hum:FindFirstChildOfClass("Animator")
+    if not animator then espChave = nil return end
+
+    for _, t in ipairs(animator:GetPlayingAnimationTracks()) do pcall(function() t:Stop(0) end) end
+    task.wait(0.1)
+    if equipado or espSessao ~= meu then return end
+
+    local a = Instance.new("Animation")
+    a.AnimationId = "rbxassetid://" .. id
+    local ok, t = pcall(function() return animator:LoadAnimation(a) end)
+    a:Destroy()
+    if not ok or not t then return warn("[FakeSword] Falha ao carregar pose " .. id) end
+
+    local jinter = id == JINTER_ID
+    t.Looped = true
+    t.Priority = jinter and Enum.AnimationPriority.Action or Enum.AnimationPriority.Idle
+    t:AdjustSpeed(SPEED)
+    espTrack = t
+
+    local pulando = false
+    local function calar(alvo)
+        for _, tr in ipairs(alvo and {alvo} or animator:GetPlayingAnimationTracks()) do
+            local pr = tr.Priority
+            if tr ~= t and (pr == Enum.AnimationPriority.Core or pr == Enum.AnimationPriority.Idle or pr == Enum.AnimationPriority.Movement) then
+                pcall(function() tr:Stop(0) end)
+            end
+        end
+    end
+    if jinter then
+        table.insert(espConns, animator.AnimationPlayed:Connect(function(tr)
+            if not pulando then calar(tr) end
+        end))
+    end
+    table.insert(espConns, hum.Running:Connect(function(speed)
+        if jinter then
+            if speed > 0 and not pulando then calar() end
+            if not pulando and not t.IsPlaying then t:Play(FADE) t:AdjustSpeed(SPEED) end
+        elseif speed > 0 then
+            if t.IsPlaying then t:Stop(FADE) end
+        elseif not pulando and not t.IsPlaying then
+            t:Play(FADE) t:AdjustSpeed(SPEED)
+        end
+    end))
+    table.insert(espConns, hum.StateChanged:Connect(function(_, s)
+        if s == Enum.HumanoidStateType.Jumping or s == Enum.HumanoidStateType.Freefall then
+            pulando = true
+            if jinter and t.IsPlaying then t:Stop(FADE) end
+        elseif s == Enum.HumanoidStateType.Running or s == Enum.HumanoidStateType.RunningNoPhysics then
+            pulando = false
+            task.defer(function()
+                if espTrack == t and (jinter or hum.MoveDirection.Magnitude == 0) and not t.IsPlaying then
+                    t:Play(FADE) t:AdjustSpeed(SPEED)
+                end
+            end)
+        end
+    end))
+    t:Play(FADE)
+end
+
+local function espRefresh()
+    if equipado then
+        if espTrack or #espConns > 0 then pararPoseEsp() end
+        espChave = nil
+        return
+    end
+    local k = uidR()
+    local id = k and posesEsp[k]
+    if not id then
+        if espTrack or #espConns > 0 or espChave then pararPoseEsp() end
+        espChave = nil
+        return
+    end
+    local alvo = k .. ":" .. id
+    if alvo == espChave then return end
+    espChave = alvo
+    task.spawn(tocarPoseEsp, id)
+end
+
 local function desequipar()
     equipado = false
     limparAnim()
@@ -1350,12 +1525,14 @@ local function desequipar()
     limparEspada()
     limparCabeca()
     mostrarOriginais()
+    espChave = nil
     if slot then slot.BackgroundColor3 = Color3.fromRGB(40, 40, 40) end
 end
 
 local function equipar()
     if not colocarEspada() then return end
     equipado = true
+    pararPoseEsp()
     if estilo3 then colocarCabeca() end
     slot.BackgroundColor3 = Color3.fromRGB(0, 140, 70)
     tocarPose()
@@ -1381,7 +1558,7 @@ local abrir = mk("TextButton", {Size = UDim2.fromOffset(70, 30), Position = UDim
     BackgroundColor3 = GRAY, TextColor3 = WHITE, Text = "Painel", Font = Enum.Font.Gotham, TextSize = 14}, gui)
 mk("UICorner", {}, abrir)
 
-local painel = mk("Frame", {Size = UDim2.fromOffset(280, 392), Position = UDim2.new(0, 20, 0.5, -196),
+local painel = mk("Frame", {Size = UDim2.fromOffset(280, 424), Position = UDim2.new(0, 20, 0.5, -212),
     BackgroundColor3 = Color3.fromRGB(20, 20, 20), Visible = false}, gui)
 mk("UICorner", {}, painel)
 
@@ -1394,7 +1571,7 @@ local tabD = mk("TextButton", {Size = UDim2.new(1/3, -8, 0, 28), Position = UDim
 local busca = mk("TextBox", {Size = UDim2.new(1, -12, 0, 28), Position = UDim2.fromOffset(6, 40), BackgroundColor3 = GRAY,
     TextColor3 = WHITE, PlaceholderText = "Buscar... (Enter usa o nome digitado)", Text = "", ClearTextOnFocus = false,
     Font = Enum.Font.Gotham, TextSize = 13}, painel)
-local lista = mk("ScrollingFrame", {Size = UDim2.new(1, -12, 1, -176), Position = UDim2.fromOffset(6, 170), BackgroundTransparency = 1,
+local lista = mk("ScrollingFrame", {Size = UDim2.new(1, -12, 1, -208), Position = UDim2.fromOffset(6, 202), BackgroundTransparency = 1,
     BorderSizePixel = 0, ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new()}, painel)
 mk("UIListLayout", {Padding = UDim.new(0, 3)}, lista)
 for _, o in ipairs({tabE, tabP, tabD, busca}) do mk("UICorner", {}, o) end
@@ -1473,6 +1650,19 @@ btnClicks.MouseButton1Click:Connect(function()
     render()
 end)
 
+-- Fixar pose na espada R real (SwordWelds, por UniqueId): um clique, sem toggle
+local btnPoseEsp = mk("TextButton", {Size = UDim2.new(1, -12, 0, 26), Position = UDim2.fromOffset(6, 170),
+    TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 13}, painel)
+mk("UICorner", {}, btnPoseEsp)
+btnPoseEsp.MouseButton1Click:Connect(function()
+    local k = uidR()
+    if not k then return warn("[FakeSword] espada R real não encontrada em SwordWelds.") end
+    posesEsp[k] = poseAtual -- sempre registra/sobrescreve, sem toggle
+    espChave = nil          -- força replay mesmo se for a mesma pose
+    espRefresh()
+    render()
+end)
+
 local aba = "Espadas"
 
 local function atualizar()
@@ -1511,6 +1701,10 @@ render = function()
     btn3.BackgroundColor3 = estilo3 and GREEN or GRAY
     btnClicks.Text = (testeClicks and "[x] " or "[ ] ") .. "Teste de Clicks"
     btnClicks.BackgroundColor3 = testeClicks and GREEN or GRAY
+    local kE = uidR()
+    local regE = kE and posesEsp[kE]
+    btnPoseEsp.Text = not regE and "Fixar pose na espada" or (regE == poseAtual and "[x] Pose fixada (reaplicar)" or "[x] Trocar pela pose selecionada")
+    btnPoseEsp.BackgroundColor3 = regE and GREEN or GRAY
     offBox.Visible = aba == "Duals"
     if not offBox:IsFocused() then offBox.Text = textoOff() end
     for k, b in pairs(btnMao) do b.BackgroundColor3 = mao == k and GREEN or GRAY b.Visible = aba ~= "Duals" end
@@ -1566,6 +1760,21 @@ end)
 abrir.MouseButton1Click:Connect(function() painel.Visible = not painel.Visible end)
 slot.MouseButton1Click:Connect(function() if equipado then desequipar() else equipar() end end)
 plr.CharacterAdded:Connect(desequipar)
+local cEspChar = plr.CharacterAdded:Connect(function() pararPoseEsp() espChave = nil end)
 
-getgenv().FakeSwordUnload = function() cDefl:Disconnect() cVigiaDefl:Disconnect() desequipar() gui:Destroy() end
+getgenv().FakeSwordUnload = function()
+    espVivo = false
+    cDefl:Disconnect() cVigiaDefl:Disconnect() cEspChar:Disconnect()
+    pararPoseEsp() desequipar() gui:Destroy()
+end
 render()
+
+-- poll: pega o UniqueId da espada R atual e reaplica a pose registrada
+task.spawn(function()
+    while espVivo do
+        local antes = espChave
+        espRefresh()
+        if espChave ~= antes then render() end
+        task.wait(0.1)
+    end
+end)
