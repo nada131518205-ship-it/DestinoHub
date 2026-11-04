@@ -830,24 +830,22 @@ for _, o in ipairs(pasta:GetDescendants()) do
 end
 print(total .. " filhos | fallback: " .. fallback .. " | falhas: " .. falhas .. " | refs: " .. religados .. "/" .. #pendRefs .. " | OFFSETS carregados: " .. offs)
 
--- Painel
--- Colocador de pose e espadas, com menu
--- R / L / R+L: escolhe em qual mao a espada clicada vai (cada mao pode ter uma espada diferente)
--- Clicar de novo na espada ja marcada de uma mao tira ela daquela mao
--- Ao equipar: espadas originais do jogo ficam invisiveis; ao desequipar voltam ao normal
--- Click: toca animacao quando o atributo isDeflecting do Player vira true (ignora mouse)
+-- Colocador de pose e espadas — HUD azul/roxo, movel, minimizavel
+-- Espadas: interruptor equipa/tira | R / L / R+L | espada na cabeca | teste de clicks
+-- Poses: interruptor liga/desliga (desligado = so Idle) | botao "Colocar pose na espada"
+-- Duals: sempre na esquerda (ltool). Offset editavel removido, usa a tabela OFFS_DUAL
+-- Roda DEPOIS do loader do SwordsDual (o bloco do raw)
 
 local NOME_PART = "Sword"
-local NOME_DUAL = "Dual" -- nome da Part nas espadas da pasta SwordsDual
--- offset das Duals: editável na aba Duals (campo de texto); as Nichi já começam com o offset abaixo
+local NOME_DUAL = "Dual"
 local OFFSET_DUAL = CFrame.new(-0.0256347656, -0.258630753, 1.69763184,
     4.84585762e-05, 4.7981739e-06, -1.00000012,
     -0.195714176, 0.980660975, -4.7981739e-06,
     0.980661094, 0.195714176, 4.84585762e-05)
-local function off(x, y, z, rx, ry, rz) -- posição + rotação em graus (mesmo formato do campo)
+local function off(x, y, z, rx, ry, rz)
     return CFrame.new(x, y, z) * CFrame.Angles(math.rad(rx), math.rad(ry), math.rad(rz))
 end
-local OFFS_DUAL = {} -- chave: nome da espada em minúsculo
+local OFFS_DUAL = {}
 local function setOff(cf, ...)
     for _, n in ipairs({...}) do OFFS_DUAL[n:lower()] = cf end
 end
@@ -881,17 +879,19 @@ setOff(CFrame.new(-2.27975464, 1.61283159, -4.00796509,
     0.822190404, -0.433294863, -0.369132161,
     0.534825623, 0.366072536, 0.761546075,
     -0.194844842, -0.823557198, 0.532718658), "Chimed Florette")
+
 local SPEED, FADE = 1, 0.25
-local JINTER_ID = "105642490152003" -- Pose Jinter: continua tocando andando
+local JINTER_ID = "105642490152003"
+local IDLE_ID = "14366558676"
 local espadas = {R = "Default Katana", L = nil}
-local lDual = false -- true: a espada da esquerda vem da aba Duals
-local poseAtual = "14366558676"
+local lDual = false
+local poseAtual = IDLE_ID
+local poseOn = true -- false: toca so o Idle
 local mao = "R"
 local PARTES = {R = "rtool", L = "ltool"}
 local ALVO = {R = {"R"}, L = {"L"}, RL = {"R", "L"}}
 local ORDEM = {"R", "L", "RL"}
 
--- Estilo 3 espadas: Default Katana na cabeça (relativo à Head)
 local KATANA_CABECA = "Default Katana"
 local CF_CABECA = CFrame.new(-2.3, -0.2, -0.5) * CFrame.Angles(math.rad(-90), 0, math.rad(90))
 local estilo3 = false
@@ -997,10 +997,10 @@ Dual Idle=114427455942612
 ]]):gmatch("([^=\n]+)=(%d+)") do table.insert(POSES, {nome, id}) end
 
 local Players, RS = game:GetService("Players"), game:GetService("ReplicatedStorage")
+local UIS, TweenService = game:GetService("UserInputService"), game:GetService("TweenService")
 local plr = Players.LocalPlayer
 if getgenv().FakeSwordUnload then pcall(getgenv().FakeSwordUnload) end
 
--- Lista de espadas (varre o ReplicatedStorage)
 local RAIZ = RS:FindFirstChild("Assets") and RS.Assets:FindFirstChild("Swords")
 if not RAIZ then warn("[FakeSword] ReplicatedStorage.Assets.Swords não encontrado, varrendo o ReplicatedStorage todo.") RAIZ = RS end
 local ESPADAS, vistos, SWORDS = {}, {}, {}
@@ -1013,7 +1013,6 @@ for _, d in ipairs(RAIZ:GetDescendants()) do
 end
 table.sort(ESPADAS)
 
--- Duals: espadas da pasta SwordsDual (só na ltool)
 local RAIZ_D = RS:FindFirstChild("SwordsDual", true)
 local DUALS, DUAL_NOMES = {}, {}
 if RAIZ_D then
@@ -1031,7 +1030,7 @@ table.sort(DUAL_NOMES)
 local equipado, track, conns, sessaoAnim = false, nil, {}, 0
 local fakes, ocultos, connsOc, vigia = {}, {}, {}, false
 local cabeca
-local slot, render
+local render
 
 local function limparAnim()
     sessaoAnim += 1
@@ -1065,7 +1064,6 @@ local function ocultar(d)
     local alvo = (prop == "Transparency") and 1 or false
     ocultos[d] = {prop, d[prop]}
     d[prop] = alvo
-    -- se o jogo mexer na propriedade enquanto equipado, forca de volta
     table.insert(connsOc, d:GetPropertyChangedSignal(prop):Connect(function()
         if equipado and ocultos[d] and d[prop] ~= alvo then d[prop] = alvo end
     end))
@@ -1099,9 +1097,9 @@ local function limparEspada()
 end
 
 local function offsetDe(objeto)
-    local off = objeto:FindFirstChild("Offset")
-    if off and off:IsA("CFrameValue") then return off.Value end
-    if off and off:IsA("Vector3Value") then return CFrame.new(off.Value) end
+    local o = objeto:FindFirstChild("Offset")
+    if o and o:IsA("CFrameValue") then return o.Value end
+    if o and o:IsA("Vector3Value") then return CFrame.new(o.Value) end
     local function n(nm) local v = objeto:FindFirstChild(nm) return (v and v:IsA("NumberValue")) and v.Value or 0 end
     return CFrame.new(n("OffsetX"), n("OffsetY"), n("OffsetZ"))
 end
@@ -1134,7 +1132,7 @@ local function colocarEspada()
                 local s = orig:Clone()
                 s.Anchored = false
                 s.CanCollide = false
-                table.insert(fakes, s) -- registra antes do Parent pro vigia ignorar
+                table.insert(fakes, s)
                 s.Parent = pasta
                 local cf = (h == "L" and lDual and OFFS_DUAL[nomeEsp:lower()]) or offsetDe(objeto)
                 s.CFrame = part.CFrame * cf
@@ -1172,6 +1170,7 @@ end
 local function tocarPose()
     limparAnim()
     local meu = sessaoAnim
+    local idP = poseOn and poseAtual or IDLE_ID
     local char = plr.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     local animator = hum and hum:FindFirstChildOfClass("Animator")
@@ -1182,12 +1181,12 @@ local function tocarPose()
     if not equipado or sessaoAnim ~= meu then return end
 
     local a = Instance.new("Animation")
-    a.AnimationId = "rbxassetid://" .. poseAtual
+    a.AnimationId = "rbxassetid://" .. idP
     local ok, t = pcall(function() return animator:LoadAnimation(a) end)
     a:Destroy()
-    if not ok or not t then return warn("[FakeSword] Falha ao carregar pose " .. poseAtual) end
+    if not ok or not t then return warn("[FakeSword] Falha ao carregar pose " .. idP) end
 
-    local jinter = poseAtual == JINTER_ID
+    local jinter = idP == JINTER_ID
     t.Looped = true
     t.Priority = jinter and Enum.AnimationPriority.Action or Enum.AnimationPriority.Idle
     t:AdjustSpeed(SPEED)
@@ -1195,7 +1194,6 @@ local function tocarPose()
 
     local pulando = false
 
-    -- Jinter: para a animação de andar/idle do jogo e mantém a pose tocando
     local function calar(alvo)
         for _, tr in ipairs(alvo and {alvo} or animator:GetPlayingAnimationTracks()) do
             local pr = tr.Priority
@@ -1253,7 +1251,7 @@ reg("87427776864993", "Heavenly Hymn", "Windful Melodies")
 reg("126428485781901", "Meowder")
 
 local clickTrack
-local testeClicks = false -- botão "Teste de Clicks": true aplica os clicks, false não aplica
+local testeClicks = false
 
 local function escolherClick()
     local r, l = espadas.R, espadas.L
@@ -1271,7 +1269,7 @@ local PRIO_ACAO = {
     [Enum.AnimationPriority.Action3] = true, [Enum.AnimationPriority.Action4] = true,
 }
 
-local clickTracks = {} -- toda track de click criada e ainda viva
+local clickTracks = {}
 
 local function pararClick()
     if clickConn then clickConn:Disconnect() clickConn = nil end
@@ -1284,7 +1282,6 @@ local function pararClick()
     end
 end
 
--- para qualquer track do jogo em prioridade de ação (menos a nossa e a pose)
 local function calarJogo(tr, t)
     if tr ~= t and tr ~= track and PRIO_ACAO[tr.Priority] then
         pcall(function() tr:Stop(0) end)
@@ -1292,7 +1289,7 @@ local function calarJogo(tr, t)
 end
 
 local function tocarClick()
-    if clickTrack and clickTrack.IsPlaying then return end -- deixa terminar
+    if clickTrack and clickTrack.IsPlaying then return end
     local id = escolherClick()
     local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
     local animator = hum and hum:FindFirstChildOfClass("Animator")
@@ -1309,7 +1306,6 @@ local function tocarClick()
     clickTrack = t
     clickTracks[t] = true
 
-    -- vigia: qualquer animação de ação que o jogo tocar durante o click é parada
     if clickConn then clickConn:Disconnect() end
     clickConn = animator.AnimationPlayed:Connect(function(tr) calarJogo(tr, t) end)
     t.Ended:Once(function()
@@ -1321,9 +1317,8 @@ local function tocarClick()
         pcall(function() t:Destroy() end)
     end)
 
-    t:Play(0.05, 100) -- weight alto: ganha o blend de qualquer track que escape
+    t:Play(0.05, 100)
     for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do calarJogo(tr, t) end
-    -- o jogo costuma tocar a dele no mesmo frame ou logo depois do atributo
     task.defer(function()
         if clickTrack ~= t then return end
         for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do calarJogo(tr, t) end
@@ -1339,27 +1334,18 @@ local cDefl = plr:GetAttributeChangedSignal("isDeflecting"):Connect(function()
     end
 end)
 
--- garantia: se o signal perder a transição, o frame seguinte mata o click
 local cVigiaDefl = game:GetService("RunService").Heartbeat:Connect(function()
     if next(clickTracks) and plr:GetAttribute("isDeflecting") ~= true then
         pararClick()
     end
 end)
 
--- ══ pose fixa na espada real R (SwordWelds, por UniqueId) ══
-local posesEsp = {}       -- [uid@nome da espada R] = id da pose
-local espChave            -- "uid@nome:pose" atualmente aplicada
+-- ══ pose fixa na espada real R (SwordWelds) ══
+local posesEsp = {}
+local espChave
 local espTrack, espConns, espSessao = nil, {}, 0
 local espVivo = true
 
-local function uidDe(i)
-    local ok, v = pcall(function() return gethiddenproperty and gethiddenproperty(i, "UniqueId") end)
-    if ok and v ~= nil then return tostring(v) end
-    ok, v = pcall(function() return i.UniqueId end)
-    if ok and v ~= nil then return tostring(v) end
-end
-
--- true se a part está soldada na rtool
 local function soldadaNaR(part)
     local okJ, juntas = pcall(function() return part:GetJoints() end)
     if okJ then
@@ -1381,7 +1367,6 @@ local function visivelEsp(c)
     return false
 end
 
--- chave da espada R real: só considera espada visível; sem fallback pra espada escondida
 local function uidR()
     local pasta = workspace:FindFirstChild(plr.Name .. " SwordWelds")
     if not pasta then return end
@@ -1397,7 +1382,6 @@ local function uidR()
     end
     if #cands == 0 then return end
 
-    -- UniqueId vem zerado no client, então a chave é uma assinatura: nome + MeshIds/TextureIds da espada
     local function chave(x)
         local ids = {}
         local function coleta(o)
@@ -1417,14 +1401,14 @@ local function uidR()
         return x.c.Name .. "#" .. table.concat(ids, "|")
     end
 
-    for _, x in ipairs(cands) do -- 1) soldada na rtool
+    for _, x in ipairs(cands) do
         local parts = {x.s}
         for _, d in ipairs(x.c:GetDescendants()) do if d:IsA("BasePart") then table.insert(parts, d) end end
         for _, p in ipairs(parts) do
             if soldadaNaR(p) then return chave(x) end
         end
     end
-    for _, x in ipairs(cands) do -- 2) visível e não é Dual
+    for _, x in ipairs(cands) do
         if not x.c:FindFirstChild(NOME_DUAL, true) then return chave(x) end
     end
 end
@@ -1526,7 +1510,6 @@ local function desequipar()
     limparCabeca()
     mostrarOriginais()
     espChave = nil
-    if slot then slot.BackgroundColor3 = Color3.fromRGB(40, 40, 40) end
 end
 
 local function equipar()
@@ -1534,12 +1517,12 @@ local function equipar()
     equipado = true
     pararPoseEsp()
     if estilo3 then colocarCabeca() end
-    slot.BackgroundColor3 = Color3.fromRGB(0, 140, 70)
     tocarPose()
 end
 
 -- ══ GUI ══
-local GRAY, GREEN, WHITE = Color3.fromRGB(40, 40, 40), Color3.fromRGB(0, 140, 70), Color3.new(1, 1, 1)
+local WHITE = Color3.new(1, 1, 1)
+local DARK, ON = Color3.fromRGB(15, 15, 45), Color3.fromRGB(150, 110, 255)
 
 local function mk(c, p, par)
     local o = Instance.new(c)
@@ -1548,40 +1531,110 @@ local function mk(c, p, par)
     return o
 end
 
+local function mkb(p, par)
+    local b = Instance.new("TextButton")
+    b.BackgroundColor3, b.BackgroundTransparency = DARK, 0.4
+    b.TextColor3, b.Font, b.TextSize, b.AutoButtonColor = WHITE, Enum.Font.GothamBold, 13, false
+    for k, v in pairs(p) do b[k] = v end
+    b.Parent = par
+    mk("UICorner", {CornerRadius = UDim.new(0, 6)}, b)
+    return b
+end
+
+local function pinta(b, on)
+    b.BackgroundColor3 = on and ON or DARK
+    b.BackgroundTransparency = on and 0.05 or 0.4
+end
+
 local gui = mk("ScreenGui", {Name = "FakeInventory", ResetOnSpawn = false}, (gethui and gethui()) or plr:WaitForChild("PlayerGui"))
 
-slot = mk("TextButton", {Size = UDim2.fromOffset(80, 80), Position = UDim2.new(0.5, -40, 1, -100),
-    BackgroundColor3 = GRAY, TextColor3 = WHITE, TextWrapped = true, TextSize = 11, Font = Enum.Font.GothamBold}, gui)
-mk("UICorner", {}, slot)
+local painel = mk("Frame", {Size = UDim2.fromOffset(300, 34), AutomaticSize = Enum.AutomaticSize.Y,
+    Position = UDim2.new(0, 20, 0.5, -230), BackgroundColor3 = WHITE, BorderSizePixel = 0, Active = true}, gui)
+mk("UICorner", {CornerRadius = UDim.new(0, 10)}, painel)
+mk("UIGradient", {Color = ColorSequence.new(Color3.fromRGB(25, 80, 230), Color3.fromRGB(135, 50, 215)), Rotation = 60}, painel)
 
-local abrir = mk("TextButton", {Size = UDim2.fromOffset(70, 30), Position = UDim2.new(0.5, 50, 1, -100),
-    BackgroundColor3 = GRAY, TextColor3 = WHITE, Text = "Painel", Font = Enum.Font.Gotham, TextSize = 14}, gui)
-mk("UICorner", {}, abrir)
+local bar = mk("Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, Active = true}, painel)
+mk("TextLabel", {Size = UDim2.new(1, -50, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+    Text = "Fake Sword", TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left}, bar)
+local btnMin = mkb({Size = UDim2.fromOffset(28, 24), Position = UDim2.new(1, -34, 0, 5), Text = "–"}, bar)
 
-local painel = mk("Frame", {Size = UDim2.fromOffset(280, 424), Position = UDim2.new(0, 20, 0.5, -212),
-    BackgroundColor3 = Color3.fromRGB(20, 20, 20), Visible = false}, gui)
-mk("UICorner", {}, painel)
+local body = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    Position = UDim2.fromOffset(0, 34), BackgroundTransparency = 1}, painel)
+mk("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, body)
+mk("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 10)}, body)
 
-local tabE = mk("TextButton", {Size = UDim2.new(1/3, -8, 0, 28), Position = UDim2.new(0, 6, 0, 6), Text = "Espadas",
-    TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 14}, painel)
-local tabP = mk("TextButton", {Size = UDim2.new(1/3, -8, 0, 28), Position = UDim2.new(1/3, 6, 0, 6), Text = "Poses",
-    TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 14}, painel)
-local tabD = mk("TextButton", {Size = UDim2.new(1/3, -8, 0, 28), Position = UDim2.new(2/3, 6, 0, 6), Text = "Duals",
-    TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 14}, painel)
-local busca = mk("TextBox", {Size = UDim2.new(1, -12, 0, 28), Position = UDim2.fromOffset(6, 40), BackgroundColor3 = GRAY,
-    TextColor3 = WHITE, PlaceholderText = "Buscar... (Enter usa o nome digitado)", Text = "", ClearTextOnFocus = false,
-    Font = Enum.Font.Gotham, TextSize = 13}, painel)
-local lista = mk("ScrollingFrame", {Size = UDim2.new(1, -12, 1, -208), Position = UDim2.fromOffset(6, 202), BackgroundTransparency = 1,
-    BorderSizePixel = 0, ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new()}, painel)
-mk("UIListLayout", {Padding = UDim.new(0, 3)}, lista)
-for _, o in ipairs({tabE, tabP, tabD, busca}) do mk("UICorner", {}, o) end
+-- mover
+local arrasto, ini, posIni
+local cDrag1 = bar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        arrasto, ini, posIni = true, i.Position, painel.Position
+    end
+end)
+local cDrag2 = UIS.InputChanged:Connect(function(i)
+    if arrasto and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - ini
+        painel.Position = UDim2.new(posIni.X.Scale, posIni.X.Offset + d.X, posIni.Y.Scale, posIni.Y.Offset + d.Y)
+    end
+end)
+local cDrag3 = UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then arrasto = false end
+end)
 
--- seletor de mao: define onde a espada clicada vai
+-- minimizar
+local minimizado = false
+btnMin.MouseButton1Click:Connect(function()
+    minimizado = not minimizado
+    body.Visible = not minimizado
+    painel.AutomaticSize = minimizado and Enum.AutomaticSize.None or Enum.AutomaticSize.Y
+    if minimizado then painel.Size = UDim2.fromOffset(300, 34) end
+    btnMin.Text = minimizado and "+" or "–"
+end)
+
+-- seleção atual
+local info = mk("TextLabel", {LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 72), BackgroundColor3 = DARK, BackgroundTransparency = 0.5,
+    TextColor3 = WHITE, Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, Text = ""}, body)
+mk("UICorner", {CornerRadius = UDim.new(0, 6)}, info)
+mk("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingTop = UDim.new(0, 6)}, info)
+
+-- abas
+local tabsRow = mk("Frame", {LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1}, body)
+local tabE = mkb({Size = UDim2.new(1/3, -4, 1, 0), Position = UDim2.new(0, 0, 0, 0), Text = "Espadas"}, tabsRow)
+local tabP = mkb({Size = UDim2.new(1/3, -4, 1, 0), Position = UDim2.new(1/3, 2, 0, 0), Text = "Poses"}, tabsRow)
+local tabD = mkb({Size = UDim2.new(1/3, -4, 1, 0), Position = UDim2.new(2/3, 4, 0, 0), Text = "Duals"}, tabsRow)
+
+-- interruptores
+local function mkSwitchRow(ordem, titulo, aoClicar)
+    local row = mk("Frame", {LayoutOrder = ordem, Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1}, body)
+    mk("TextLabel", {Size = UDim2.new(1, -56, 1, 0), BackgroundTransparency = 1, Text = titulo, TextColor3 = WHITE,
+        Font = Enum.Font.GothamBold, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left}, row)
+    local trilho = mkb({Size = UDim2.fromOffset(46, 22), Position = UDim2.new(1, -46, 0.5, -11), Text = ""}, row)
+    trilho:FindFirstChildOfClass("UICorner").CornerRadius = UDim.new(1, 0)
+    local knob = mk("Frame", {Size = UDim2.fromOffset(18, 18), Position = UDim2.fromOffset(2, 2), BackgroundColor3 = WHITE, BorderSizePixel = 0}, trilho)
+    mk("UICorner", {CornerRadius = UDim.new(1, 0)}, knob)
+    trilho.MouseButton1Click:Connect(aoClicar)
+    return row, function(on)
+        pinta(trilho, on)
+        TweenService:Create(knob, TweenInfo.new(0.15), {Position = on and UDim2.fromOffset(26, 2) or UDim2.fromOffset(2, 2)}):Play()
+    end
+end
+
+local rowEquip, setEquip = mkSwitchRow(3, "Espada equipada", function()
+    if equipado then desequipar() else equipar() end
+    render()
+end)
+local rowPose, setPoseSw = mkSwitchRow(4, "Pose ativa (off = Idle)", function()
+    poseOn = not poseOn
+    if equipado then task.spawn(tocarPose) end
+    render()
+end)
+
+-- mão: R / L / R+L
+local handsRow = mk("Frame", {LayoutOrder = 5, Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1}, body)
 local btnMao = {}
 for i, k in ipairs(ORDEM) do
-    local b = mk("TextButton", {Size = UDim2.new(1/3, -8, 0, 26), Position = UDim2.new((i - 1) / 3, 6, 0, 74),
-        Text = k == "RL" and "R+L" or k, TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 13}, painel)
-    mk("UICorner", {}, b)
+    local b = mkb({Size = UDim2.new(1/3, -4, 1, 0), Position = UDim2.new((i - 1) / 3, (i - 1) * 2, 0, 0),
+        Text = k == "RL" and "R+L" or k}, handsRow)
     btnMao[k] = b
     b.MouseButton1Click:Connect(function()
         mao = k
@@ -1589,49 +1642,8 @@ for i, k in ipairs(ORDEM) do
     end)
 end
 
--- offset manual da Dual selecionada (aba Duals): "x, y, z, rx, ry, rz" (graus) ou os 12 valores do CFrame
-local function textoOff()
-    local nome = lDual and espadas.L
-    local part = nome and DUALS[nome]
-    if not part then return "" end
-    local cf = OFFS_DUAL[nome:lower()] or offsetDe(part.Parent)
-    local rx, ry, rz = cf:ToEulerAnglesXYZ()
-    local v = {cf.X, cf.Y, cf.Z, math.deg(rx), math.deg(ry), math.deg(rz)}
-    for i, n in ipairs(v) do v[i] = string.format("%.4f", n) end
-    return table.concat(v, ", ")
-end
-
-local offBox = mk("TextBox", {Size = UDim2.new(1, -12, 0, 26), Position = UDim2.fromOffset(6, 74), BackgroundColor3 = GRAY,
-    TextColor3 = WHITE, PlaceholderText = "selecione uma Dual para editar o offset", Text = "", ClearTextOnFocus = false,
-    TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 11, Visible = false}, painel)
-mk("UICorner", {}, offBox)
-
-offBox.FocusLost:Connect(function()
-    local nome = lDual and espadas.L
-    if nome and DUALS[nome] and offBox.Text ~= textoOff() then
-        local n = {}
-        for tok in offBox.Text:gmatch("[^,%s]+") do
-            local v = tonumber(tok)
-            if v then table.insert(n, v) end
-        end
-        local cf
-        if #n == 12 then
-            cf = CFrame.new(table.unpack(n))
-        elseif #n == 6 then
-            cf = CFrame.new(n[1], n[2], n[3]) * CFrame.Angles(math.rad(n[4]), math.rad(n[5]), math.rad(n[6]))
-        end
-        if cf then
-            OFFS_DUAL[nome:lower()] = cf
-            if equipado then colocarEspada() end
-        end
-    end
-    render()
-end)
-
--- estilo 3 espadas (marcar / desmarcar)
-local btn3 = mk("TextButton", {Size = UDim2.new(1, -12, 0, 26), Position = UDim2.fromOffset(6, 106),
-    TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 13}, painel)
-mk("UICorner", {}, btn3)
+-- espada na cabeça (só aba Espadas)
+local btn3 = mkb({LayoutOrder = 6, Size = UDim2.new(1, 0, 0, 28)}, body)
 btn3.MouseButton1Click:Connect(function()
     estilo3 = not estilo3
     if equipado then
@@ -1640,28 +1652,33 @@ btn3.MouseButton1Click:Connect(function()
     render()
 end)
 
--- Teste de Clicks (liga/desliga as animações de click)
-local btnClicks = mk("TextButton", {Size = UDim2.new(1, -12, 0, 26), Position = UDim2.fromOffset(6, 138),
-    TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 13}, painel)
-mk("UICorner", {}, btnClicks)
+-- teste de clicks (só aba Espadas)
+local btnClicks = mkb({LayoutOrder = 7, Size = UDim2.new(1, 0, 0, 28)}, body)
 btnClicks.MouseButton1Click:Connect(function()
     testeClicks = not testeClicks
     if not testeClicks then pararClick() end
     render()
 end)
 
--- Fixar pose na espada R real (SwordWelds, por UniqueId): um clique, sem toggle
-local btnPoseEsp = mk("TextButton", {Size = UDim2.new(1, -12, 0, 26), Position = UDim2.fromOffset(6, 170),
-    TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 13}, painel)
-mk("UICorner", {}, btnPoseEsp)
+-- colocar pose na espada (só aba Poses, um clique)
+local btnPoseEsp = mkb({LayoutOrder = 8, Size = UDim2.new(1, 0, 0, 28)}, body)
 btnPoseEsp.MouseButton1Click:Connect(function()
     local k = uidR()
     if not k then return warn("[FakeSword] espada R real não encontrada em SwordWelds.") end
-    posesEsp[k] = poseAtual -- sempre registra/sobrescreve, sem toggle
-    espChave = nil          -- força replay mesmo se for a mesma pose
+    posesEsp[k] = poseAtual
+    espChave = nil
     espRefresh()
     render()
 end)
+
+local busca = mk("TextBox", {LayoutOrder = 9, Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = DARK, BackgroundTransparency = 0.4,
+    TextColor3 = WHITE, PlaceholderText = "Buscar... (Enter usa o nome digitado)", PlaceholderColor3 = Color3.fromRGB(180, 180, 210),
+    Text = "", ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 13}, body)
+mk("UICorner", {CornerRadius = UDim.new(0, 6)}, busca)
+
+local lista = mk("ScrollingFrame", {LayoutOrder = 10, Size = UDim2.new(1, 0, 0, 170), BackgroundTransparency = 1,
+    BorderSizePixel = 0, ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new()}, body)
+mk("UIListLayout", {Padding = UDim.new(0, 3)}, lista)
 
 local aba = "Espadas"
 
@@ -1682,7 +1699,6 @@ local function aplicar(nome)
     atualizar()
 end
 
--- Duals: sempre na esquerda (ltool); clicar de novo tira
 local function aplicarDual(nome)
     if lDual and espadas.L == nome then
         espadas.L, lDual = nil, false
@@ -1692,22 +1708,33 @@ local function aplicarDual(nome)
     atualizar()
 end
 
+local function nomePose()
+    for _, p in ipairs(POSES) do if p[2] == poseAtual then return p[1] end end
+    return poseAtual
+end
+
 render = function()
-    slot.Text = "R: " .. (espadas.R or "-") .. "\nL: " .. (espadas.L or "-")
-    tabE.BackgroundColor3 = aba == "Espadas" and GREEN or GRAY
-    tabP.BackgroundColor3 = aba == "Poses" and GREEN or GRAY
-    tabD.BackgroundColor3 = aba == "Duals" and GREEN or GRAY
-    btn3.Text = (estilo3 and "[x] " or "[ ] ") .. "Estilo 3 espadas"
-    btn3.BackgroundColor3 = estilo3 and GREEN or GRAY
+    info.Text = "Selecionado\nR: " .. (espadas.R or "-") .. "\nL: " .. (espadas.L or "-") .. (lDual and espadas.L and " (Dual)" or "")
+        .. "\nPose: " .. (poseOn and nomePose() or "Idle (desligada)") .. (estilo3 and "  |  Cabeça: on" or "")
+    pinta(tabE, aba == "Espadas") pinta(tabP, aba == "Poses") pinta(tabD, aba == "Duals")
+    setEquip(equipado) setPoseSw(poseOn)
+    rowEquip.Visible = aba ~= "Poses"
+    rowPose.Visible = aba == "Poses"
+    handsRow.Visible = aba == "Espadas"
+    btn3.Visible = aba == "Espadas"
+    btnClicks.Visible = aba == "Espadas"
+    btnPoseEsp.Visible = aba == "Poses"
+
+    btn3.Text = (estilo3 and "[x] " or "[ ] ") .. "Espada na cabeça"
+    pinta(btn3, estilo3)
     btnClicks.Text = (testeClicks and "[x] " or "[ ] ") .. "Teste de Clicks"
-    btnClicks.BackgroundColor3 = testeClicks and GREEN or GRAY
+    pinta(btnClicks, testeClicks)
     local kE = uidR()
     local regE = kE and posesEsp[kE]
-    btnPoseEsp.Text = not regE and "Fixar pose na espada" or (regE == poseAtual and "[x] Pose fixada (reaplicar)" or "[x] Trocar pela pose selecionada")
-    btnPoseEsp.BackgroundColor3 = regE and GREEN or GRAY
-    offBox.Visible = aba == "Duals"
-    if not offBox:IsFocused() then offBox.Text = textoOff() end
-    for k, b in pairs(btnMao) do b.BackgroundColor3 = mao == k and GREEN or GRAY b.Visible = aba ~= "Duals" end
+    btnPoseEsp.Text = not regE and "Colocar pose na espada" or (regE == poseAtual and "[x] Pose na espada (reaplicar)" or "[x] Trocar pela pose selecionada")
+    pinta(btnPoseEsp, regE ~= nil)
+    for k, b in pairs(btnMao) do pinta(b, mao == k) end
+
     for _, c in ipairs(lista:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
 
     local q = busca.Text:lower()
@@ -1724,14 +1751,13 @@ render = function()
                 end
             end
             local sel = id and id == poseAtual or (not id and tag ~= "")
-            local b = mk("TextButton", {Size = UDim2.new(1, -6, 0, 26), BackgroundColor3 = sel and GREEN or GRAY, TextColor3 = WHITE,
-                Text = "  " .. nome .. (tag ~= "" and ("   [" .. tag .. "]") or ""), TextXAlignment = Enum.TextXAlignment.Left,
-                Font = Enum.Font.Gotham, TextSize = 13}, lista)
-            mk("UICorner", {}, b)
+            local b = mkb({Size = UDim2.new(1, -6, 0, 26), Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left,
+                Text = "  " .. nome .. (tag ~= "" and ("   [" .. tag .. "]") or "")}, lista)
+            pinta(b, sel)
             b.MouseButton1Click:Connect(function()
                 if id then
                     poseAtual = id
-                    if equipado then task.spawn(tocarPose) end
+                    if equipado and poseOn then task.spawn(tocarPose) end
                 elseif aba == "Duals" then
                     aplicarDual(nome)
                 else
@@ -1757,19 +1783,17 @@ busca.FocusLost:Connect(function(enter)
     end
 end)
 
-abrir.MouseButton1Click:Connect(function() painel.Visible = not painel.Visible end)
-slot.MouseButton1Click:Connect(function() if equipado then desequipar() else equipar() end end)
-plr.CharacterAdded:Connect(desequipar)
+local cChar = plr.CharacterAdded:Connect(function() desequipar() render() end)
 local cEspChar = plr.CharacterAdded:Connect(function() pararPoseEsp() espChave = nil end)
 
 getgenv().FakeSwordUnload = function()
     espVivo = false
-    cDefl:Disconnect() cVigiaDefl:Disconnect() cEspChar:Disconnect()
+    cDefl:Disconnect() cVigiaDefl:Disconnect() cEspChar:Disconnect() cChar:Disconnect()
+    cDrag1:Disconnect() cDrag2:Disconnect() cDrag3:Disconnect()
     pararPoseEsp() desequipar() gui:Destroy()
 end
 render()
 
--- poll: pega o UniqueId da espada R atual e reaplica a pose registrada
 task.spawn(function()
     while espVivo do
         local antes = espChave
