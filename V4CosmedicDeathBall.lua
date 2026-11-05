@@ -833,6 +833,7 @@ print(total .. " filhos | fallback: " .. fallback .. " | falhas: " .. falhas .. 
 -- Colocador de pose e espadas — HUD azul/roxo, movel, minimizavel
 -- Espadas: interruptor equipa/tira | R / L / R+L | espada na cabeca | teste de clicks
 -- Poses: interruptor liga/desliga (desligado = so Idle) | botao "Colocar pose na espada"
+-- Cores: slider de cor por MeshPart/Surface/Particle/Beam/Trail (+ Fire/Smoke/Sparkles/luz/Decal/Texture/Highlight) na espada inteira, por mao (R / L-Dual)
 -- Duals: sempre na esquerda (ltool). Offset editavel removido, usa a tabela OFFS_DUAL
 -- Roda DEPOIS do loader do SwordsDual (o bloco do raw)
 
@@ -1029,6 +1030,7 @@ table.sort(DUAL_NOMES)
 
 local equipado, track, conns, sessaoAnim = false, nil, {}, 0
 local fakes, ocultos, connsOc, vigia = {}, {}, {}, false
+local fakesMao = {}
 local cabeca
 local render
 
@@ -1093,7 +1095,7 @@ end
 -- ══ espadas falsas ══
 local function limparEspada()
     for _, f in ipairs(fakes) do f:Destroy() end
-    fakes = {}
+    fakes, fakesMao = {}, {}
 end
 
 local function offsetDe(objeto)
@@ -1102,6 +1104,104 @@ local function offsetDe(objeto)
     if o and o:IsA("Vector3Value") then return CFrame.new(o.Value) end
     local function n(nm) local v = objeto:FindFirstChild(nm) return (v and v:IsA("NumberValue")) and v.Value or 0 end
     return CFrame.new(n("OffsetX"), n("OffsetY"), n("OffsetZ"))
+end
+
+-- ══ cores por parte ══
+local CORES = {} -- [corId][chave] = t (0..1 na barra)
+local RED = Color3.fromHSV(0, 1, 1)
+
+local function corDeT(t)
+    if t < 0.07 then return Color3.new(1, 1, 1):Lerp(RED, t / 0.07) end
+    if t > 0.93 then return RED:Lerp(Color3.new(0, 0, 0), (t - 0.93) / 0.07) end
+    return Color3.fromHSV((t - 0.07) / 0.86, 1, 1)
+end
+
+local function seqCores()
+    local k = {ColorSequenceKeypoint.new(0, Color3.new(1, 1, 1)), ColorSequenceKeypoint.new(0.07, RED)}
+    for n = 1, 6 do
+        table.insert(k, ColorSequenceKeypoint.new(0.07 + 0.86 * n / 6, Color3.fromHSV(n / 6, 1, 1)))
+    end
+    table.insert(k, ColorSequenceKeypoint.new(1, Color3.new(0, 0, 0)))
+    return ColorSequence.new(k)
+end
+
+local function corId(h)
+    if not espadas[h] then return end
+    return h .. "|" .. ((h == "L" and lDual) and "D" or "S") .. "|" .. espadas[h]
+end
+
+-- varre a espada inteira (todos os descendentes do clone): MeshPart, SurfaceAppearance,
+-- ParticleEmitter, Beam, Trail + Fire/Smoke/Sparkles/luzes/Decal/Texture/Highlight
+local TIPOS_COR = {
+    {"MeshPart", "cor"}, {"SurfaceAppearance", "cor"},
+    {"ParticleEmitter", "seq"}, {"Beam", "seq"}, {"Trail", "seq"},
+    {"Fire", "fogo"}, {"Smoke", "cor"}, {"Sparkles", "faisca"},
+    {"PointLight", "cor"}, {"SpotLight", "cor"}, {"SurfaceLight", "cor"},
+    {"Decal", "cor3"}, {"Texture", "cor3"}, {"Highlight", "hl"},
+}
+
+local function modoDe(i)
+    for _, t in ipairs(TIPOS_COR) do
+        if i:IsA(t[1]) then return t[2] end
+    end
+end
+
+local function setCor(i, c)
+    local m = modoDe(i)
+    if m == "seq" then
+        i.Color = ColorSequence.new(c)
+    elseif m == "fogo" then
+        i.Color, i.SecondaryColor = c, c
+    elseif m == "faisca" then
+        i.SparkleColor = c
+    elseif m == "cor3" then
+        i.Color3 = c
+    elseif m == "hl" then
+        i.FillColor, i.OutlineColor = c, c
+    elseif m == "cor" then
+        i.Color = c
+    elseif i:IsA("BasePart") then
+        i.Color = c
+    end
+end
+
+local function rotuloDe(i)
+    if i:IsA("SurfaceAppearance") then
+        return "[Surface] " .. (i.Parent and i.Parent.Name or "?")
+    elseif i:IsA("MeshPart") then
+        return "[Mesh] " .. i.Name
+    elseif i:IsA("BasePart") then
+        return "[Part] " .. i.Name
+    end
+    return "[" .. i.ClassName .. "] " .. i.Name
+end
+
+local function partesDe(raiz)
+    local out = {}
+    if raiz:IsA("BasePart") then table.insert(out, raiz) end
+    for _, d in ipairs(raiz:GetDescendants()) do
+        if modoDe(d) then table.insert(out, d) end
+    end
+    return out
+end
+
+local function chaveDe(raiz, i)
+    local p, o = {}, i
+    while o and o ~= raiz do
+        table.insert(p, 1, o.Name .. "#" .. (table.find(o.Parent:GetChildren(), o) or 0))
+        o = o.Parent
+    end
+    return #p == 0 and "root" or table.concat(p, "/")
+end
+
+local function aplicarCores(h, raiz)
+    local id = corId(h)
+    local t = id and CORES[id]
+    if not t then return end
+    for _, i in ipairs(partesDe(raiz)) do
+        local v = t[chaveDe(raiz, i)]
+        if v then setCor(i, corDeT(v)) end
+    end
 end
 
 local function colocarEspada()
@@ -1134,6 +1234,8 @@ local function colocarEspada()
                 s.CanCollide = false
                 table.insert(fakes, s)
                 s.Parent = pasta
+                fakesMao[h] = s
+                aplicarCores(h, s)
                 local cf = (h == "L" and lDual and OFFS_DUAL[nomeEsp:lower()]) or offsetDe(objeto)
                 s.CFrame = part.CFrame * cf
 
@@ -1599,9 +1701,10 @@ mk("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingTop = UDim.new(0, 6)}, inf
 
 -- abas
 local tabsRow = mk("Frame", {LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1}, body)
-local tabE = mkb({Size = UDim2.new(1/3, -4, 1, 0), Position = UDim2.new(0, 0, 0, 0), Text = "Espadas"}, tabsRow)
-local tabP = mkb({Size = UDim2.new(1/3, -4, 1, 0), Position = UDim2.new(1/3, 2, 0, 0), Text = "Poses"}, tabsRow)
-local tabD = mkb({Size = UDim2.new(1/3, -4, 1, 0), Position = UDim2.new(2/3, 4, 0, 0), Text = "Duals"}, tabsRow)
+local tabE = mkb({Size = UDim2.new(0.25, -3, 1, 0), Position = UDim2.new(0, 0, 0, 0), Text = "Espadas"}, tabsRow)
+local tabP = mkb({Size = UDim2.new(0.25, -3, 1, 0), Position = UDim2.new(0.25, 1, 0, 0), Text = "Poses"}, tabsRow)
+local tabD = mkb({Size = UDim2.new(0.25, -3, 1, 0), Position = UDim2.new(0.5, 2, 0, 0), Text = "Duals"}, tabsRow)
+local tabC = mkb({Size = UDim2.new(0.25, -3, 1, 0), Position = UDim2.new(0.75, 3, 0, 0), Text = "Cores"}, tabsRow)
 
 -- interruptores
 local function mkSwitchRow(ordem, titulo, aoClicar)
@@ -1680,6 +1783,92 @@ local lista = mk("ScrollingFrame", {LayoutOrder = 10, Size = UDim2.new(1, 0, 0, 
     BorderSizePixel = 0, ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new()}, body)
 mk("UIListLayout", {Padding = UDim.new(0, 3)}, lista)
 
+-- ══ aba Cores: mão + sliders ══
+local corMao = "R"
+local corRow = mk("Frame", {LayoutOrder = 5, Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1}, body)
+local btnCor = {}
+for n, k in ipairs({"R", "L"}) do
+    local b = mkb({Size = UDim2.new(0.5, -3, 1, 0), Position = UDim2.new((n - 1) / 2, (n - 1) * 3, 0, 0),
+        Text = k == "L" and "L / Dual" or "R"}, corRow)
+    btnCor[k] = b
+    b.MouseButton1Click:Connect(function() corMao = k render() end)
+end
+
+local sliderAtivo
+local cSl1 = UIS.InputChanged:Connect(function(i)
+    if sliderAtivo and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        sliderAtivo(i.Position.X)
+    end
+end)
+local cSl2 = UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then sliderAtivo = nil end
+end)
+
+local function rebuild()
+    if equipado then colocarEspada() end
+    render()
+end
+
+local function renderCores()
+    local raiz = fakesMao[corMao]
+    local id = corId(corMao)
+    if not (raiz and id) then
+        mk("TextLabel", {Size = UDim2.new(1, -6, 0, 40), BackgroundTransparency = 1, TextWrapped = true,
+            TextColor3 = WHITE, Font = Enum.Font.Gotham, TextSize = 12,
+            Text = "Equipe uma espada na mão " .. corMao .. " (aba Espadas/Duals) pra listar as partes."}, lista)
+        return
+    end
+    CORES[id] = CORES[id] or {}
+
+    local resetAll = mkb({Size = UDim2.new(1, -6, 0, 24), Font = Enum.Font.Gotham, Text = "Resetar cores desta mão"}, lista)
+    resetAll.MouseButton1Click:Connect(function() CORES[id] = nil rebuild() end)
+
+    local partes = partesDe(raiz)
+    if #partes == 0 then
+        mk("TextLabel", {Size = UDim2.new(1, -6, 0, 30), BackgroundTransparency = 1, TextColor3 = WHITE,
+            Font = Enum.Font.Gotham, TextSize = 12, Text = "Nenhuma parte colorível."}, lista)
+        return
+    end
+
+    for _, i in ipairs(partes) do
+        local k = chaveDe(raiz, i)
+        local row = mk("Frame", {Size = UDim2.new(1, -6, 0, 48), BackgroundTransparency = 1}, lista)
+        mk("TextLabel", {Size = UDim2.new(1, -28, 0, 18), BackgroundTransparency = 1, TextColor3 = WHITE,
+            Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = rotuloDe(i)}, row)
+        local rst = mkb({Size = UDim2.fromOffset(22, 18), Position = UDim2.new(1, -22, 0, 0), Text = "x", TextSize = 11}, row)
+
+        local sbar = mk("Frame", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.fromOffset(0, 26),
+            BackgroundColor3 = WHITE, BorderSizePixel = 0, Active = true}, row)
+        mk("UICorner", {CornerRadius = UDim.new(0, 5)}, sbar)
+        mk("UIGradient", {Color = seqCores()}, sbar)
+        local knob = mk("Frame", {Size = UDim2.fromOffset(6, 20), AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.new(0, 0, 0, -3), BackgroundColor3 = WHITE, BorderSizePixel = 0,
+            ZIndex = 2, Visible = false}, sbar)
+        mk("UICorner", {CornerRadius = UDim.new(0, 3)}, knob)
+        mk("UIStroke", {Color = Color3.new(0, 0, 0), Thickness = 1}, knob)
+
+        local t0 = CORES[id][k]
+        if t0 then knob.Visible, knob.Position = true, UDim2.new(t0, 0, 0, -3) end
+
+        local function upd(x)
+            if not i.Parent then return end
+            local t = math.clamp((x - sbar.AbsolutePosition.X) / math.max(sbar.AbsoluteSize.X, 1), 0, 1)
+            CORES[id][k] = t
+            knob.Visible, knob.Position = true, UDim2.new(t, 0, 0, -3)
+            setCor(i, corDeT(t))
+        end
+        sbar.InputBegan:Connect(function(inp)
+            if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+                sliderAtivo = upd
+                upd(inp.Position.X)
+            end
+        end)
+        rst.MouseButton1Click:Connect(function() CORES[id][k] = nil rebuild() end)
+    end
+end
+
 local aba = "Espadas"
 
 local function atualizar()
@@ -1716,7 +1905,10 @@ end
 render = function()
     info.Text = "Selecionado\nR: " .. (espadas.R or "-") .. "\nL: " .. (espadas.L or "-") .. (lDual and espadas.L and " (Dual)" or "")
         .. "\nPose: " .. (poseOn and nomePose() or "Idle (desligada)") .. (estilo3 and "  |  Cabeça: on" or "")
-    pinta(tabE, aba == "Espadas") pinta(tabP, aba == "Poses") pinta(tabD, aba == "Duals")
+    pinta(tabE, aba == "Espadas") pinta(tabP, aba == "Poses") pinta(tabD, aba == "Duals") pinta(tabC, aba == "Cores")
+    corRow.Visible = aba == "Cores"
+    busca.Visible = aba ~= "Cores"
+    for k, b in pairs(btnCor) do pinta(b, corMao == k) end
     setEquip(equipado) setPoseSw(poseOn)
     rowEquip.Visible = aba ~= "Poses"
     rowPose.Visible = aba == "Poses"
@@ -1735,7 +1927,10 @@ render = function()
     pinta(btnPoseEsp, regE ~= nil)
     for k, b in pairs(btnMao) do pinta(b, mao == k) end
 
-    for _, c in ipairs(lista:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+    for _, c in ipairs(lista:GetChildren()) do
+        if not c:IsA("UIListLayout") then c:Destroy() end
+    end
+    if aba == "Cores" then return renderCores() end
 
     local q = busca.Text:lower()
     for _, item in ipairs(aba == "Espadas" and ESPADAS or aba == "Poses" and POSES or DUAL_NOMES) do
@@ -1772,6 +1967,7 @@ end
 tabE.MouseButton1Click:Connect(function() aba = "Espadas" render() end)
 tabP.MouseButton1Click:Connect(function() aba = "Poses" render() end)
 tabD.MouseButton1Click:Connect(function() aba = "Duals" render() end)
+tabC.MouseButton1Click:Connect(function() aba = "Cores" render() end)
 busca:GetPropertyChangedSignal("Text"):Connect(render)
 busca.FocusLost:Connect(function(enter)
     if enter and aba == "Espadas" and SWORDS[busca.Text] then
@@ -1790,6 +1986,7 @@ getgenv().FakeSwordUnload = function()
     espVivo = false
     cDefl:Disconnect() cVigiaDefl:Disconnect() cEspChar:Disconnect() cChar:Disconnect()
     cDrag1:Disconnect() cDrag2:Disconnect() cDrag3:Disconnect()
+    cSl1:Disconnect() cSl2:Disconnect()
     pararPoseEsp() desequipar() gui:Destroy()
 end
 render()
