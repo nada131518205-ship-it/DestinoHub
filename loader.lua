@@ -1,6 +1,6 @@
 local HttpService = game:GetService("HttpService")
 local HWID = game:GetService("RbxAnalyticsService"):GetClientId()
-local BASE = "https://destino-keys.SEUUSER.workers.dev"
+local BASE = "https://destino-keys.nada131518205.workers.dev/"
 local req = (syn and syn.request) or http_request or request
 
 local function post(path, body)
