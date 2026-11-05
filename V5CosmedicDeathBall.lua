@@ -832,7 +832,7 @@ print(total .. " filhos | fallback: " .. fallback .. " | falhas: " .. falhas .. 
 
 -- Colocador de pose e espadas — HUD azul/roxo, movel, minimizavel
 -- Espadas: interruptor equipa/tira | R / L / R+L | espada na cabeca | teste de clicks
--- Poses: interruptor liga/desliga (desligado = so Idle) | botao "Colocar pose na espada"
+-- Poses: interruptor liga/desliga (desligado = so Idle) | travar pose | timeline | pause | 2x | 1x | botao "Colocar pose na espada"
 -- Cores: slider de cor por MeshPart/Surface/Particle/Beam/Trail (+ Fire/Smoke/Sparkles/luz/Decal/Texture/Highlight) na espada inteira, por mao (R / L-Dual)
 -- Duals: sempre na esquerda (ltool). Offset editavel removido, usa a tabela OFFS_DUAL
 -- Roda DEPOIS do loader do SwordsDual (o bloco do raw)
@@ -888,10 +888,16 @@ local espadas = {R = "Default Katana", L = nil}
 local lDual = false
 local poseAtual = IDLE_ID
 local poseOn = true -- false: toca so o Idle
+local travarPose = false -- true: pose segue tocando no walk, igual a Jinter
 local mao = "R"
 local PARTES = {R = "rtool", L = "ltool"}
 local ALVO = {R = {"R"}, L = {"L"}, RL = {"R", "L"}}
 local ORDEM = {"R", "L", "RL"}
+
+-- Jinter sempre trava; as demais travam quando "Travar pose" esta ligado (Idle puro nunca trava)
+local function travada(id)
+    return id == JINTER_ID or (travarPose and id ~= IDLE_ID)
+end
 
 local KATANA_CABECA = "Default Katana"
 local CF_CABECA = CFrame.new(-2.3, -0.2, -0.5) * CFrame.Angles(math.rad(-90), 0, math.rad(90))
@@ -1288,7 +1294,7 @@ local function tocarPose()
     a:Destroy()
     if not ok or not t then return warn("[FakeSword] Falha ao carregar pose " .. idP) end
 
-    local jinter = idP == JINTER_ID
+    local jinter = travada(idP)
     t.Looped = true
     t.Priority = jinter and Enum.AnimationPriority.Action or Enum.AnimationPriority.Idle
     t:AdjustSpeed(SPEED)
@@ -1539,7 +1545,7 @@ local function tocarPoseEsp(id)
     a:Destroy()
     if not ok or not t then return warn("[FakeSword] Falha ao carregar pose " .. id) end
 
-    local jinter = id == JINTER_ID
+    local jinter = travada(id)
     t.Looped = true
     t.Priority = jinter and Enum.AnimationPriority.Action or Enum.AnimationPriority.Idle
     t:AdjustSpeed(SPEED)
@@ -1732,6 +1738,18 @@ local rowPose, setPoseSw = mkSwitchRow(4, "Pose ativa (off = Idle)", function()
     render()
 end)
 
+-- Travar pose: mantém a pose tocando no walk (igual Jinter)
+local rowTravar, setTravarSw = mkSwitchRow(9, "Travar pose", function()
+    travarPose = not travarPose
+    if equipado then
+        task.spawn(tocarPose)
+    else
+        espChave = nil
+        espRefresh()
+    end
+    render()
+end)
+
 -- mão: R / L / R+L
 local handsRow = mk("Frame", {LayoutOrder = 5, Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1}, body)
 local btnMao = {}
@@ -1764,7 +1782,7 @@ btnClicks.MouseButton1Click:Connect(function()
 end)
 
 -- colocar pose na espada (só aba Poses, um clique)
-local btnPoseEsp = mkb({LayoutOrder = 8, Size = UDim2.new(1, 0, 0, 28)}, body)
+local btnPoseEsp = mkb({LayoutOrder = 10, Size = UDim2.new(1, 0, 0, 28)}, body)
 btnPoseEsp.MouseButton1Click:Connect(function()
     local k = uidR()
     if not k then return warn("[FakeSword] espada R real não encontrada em SwordWelds.") end
@@ -1774,12 +1792,12 @@ btnPoseEsp.MouseButton1Click:Connect(function()
     render()
 end)
 
-local busca = mk("TextBox", {LayoutOrder = 9, Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = DARK, BackgroundTransparency = 0.4,
+local busca = mk("TextBox", {LayoutOrder = 11, Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = DARK, BackgroundTransparency = 0.4,
     TextColor3 = WHITE, PlaceholderText = "Buscar... (Enter usa o nome digitado)", PlaceholderColor3 = Color3.fromRGB(180, 180, 210),
     Text = "", ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 13}, body)
 mk("UICorner", {CornerRadius = UDim.new(0, 6)}, busca)
 
-local lista = mk("ScrollingFrame", {LayoutOrder = 10, Size = UDim2.new(1, 0, 0, 170), BackgroundTransparency = 1,
+local lista = mk("ScrollingFrame", {LayoutOrder = 12, Size = UDim2.new(1, 0, 0, 170), BackgroundTransparency = 1,
     BorderSizePixel = 0, ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new()}, body)
 mk("UIListLayout", {Padding = UDim.new(0, 3)}, lista)
 
@@ -1871,6 +1889,75 @@ end
 
 local aba = "Espadas"
 
+-- ══ controles da pose: timeline / pause / 2x / 1x ══
+local pausado, dobro, arrastandoTl = false, false, false
+
+local ctlPose = mk("Frame", {LayoutOrder = 8, Size = UDim2.new(1, 0, 0, 72), BackgroundTransparency = 1, Visible = false}, body)
+local tlBar = mk("Frame", {Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, 6),
+    BackgroundColor3 = DARK, BackgroundTransparency = 0.4, BorderSizePixel = 0, Active = true}, ctlPose)
+mk("UICorner", {CornerRadius = UDim.new(0, 5)}, tlBar)
+local tlFill = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = ON, BorderSizePixel = 0}, tlBar)
+mk("UICorner", {CornerRadius = UDim.new(0, 5)}, tlFill)
+local tlKnob = mk("Frame", {Size = UDim2.fromOffset(8, 22), AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = WHITE, BorderSizePixel = 0, ZIndex = 2}, tlBar)
+mk("UICorner", {CornerRadius = UDim.new(0, 3)}, tlKnob)
+mk("UIStroke", {Color = Color3.new(0, 0, 0), Thickness = 1}, tlKnob)
+local lblT = mk("TextLabel", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.fromOffset(0, 28), BackgroundTransparency = 1,
+    TextColor3 = WHITE, Font = Enum.Font.Gotham, TextSize = 11, Text = "0.00 / 0.00s"}, ctlPose)
+local btnPause = mkb({Size = UDim2.new(1/3, -4, 0, 24), Position = UDim2.new(0, 0, 0, 46), Text = "II", TextSize = 12}, ctlPose)
+local btn2x = mkb({Size = UDim2.new(1/3, -4, 0, 24), Position = UDim2.new(1/3, 2, 0, 46), Text = ">> 2x", TextSize = 12}, ctlPose)
+local btn1x = mkb({Size = UDim2.new(1/3, -4, 0, 24), Position = UDim2.new(2/3, 4, 0, 46), Text = "1x Normal", TextSize = 12}, ctlPose)
+
+local function trilhaAtiva()
+    local t = equipado and track or espTrack
+    if t and t.Length > 0 then return t end
+end
+
+local function aplicarVel()
+    SPEED = pausado and 0 or (dobro and 2 or 1)
+    for _, t in ipairs({track or false, espTrack or false}) do
+        if t then pcall(function() t:AdjustSpeed(SPEED) end) end
+    end
+end
+
+local function posTl(p, t)
+    p = math.clamp(p, 0, 1)
+    tlFill.Size = UDim2.new(p, 0, 1, 0)
+    tlKnob.Position = UDim2.new(p, 0, 0.5, 0)
+    lblT.Text = string.format("%.2f / %.2fs", t and t.TimePosition or 0, t and t.Length or 0)
+end
+
+local function updTl(x)
+    local t = trilhaAtiva()
+    if not t then return end
+    arrastandoTl = true
+    local p = math.clamp((x - tlBar.AbsolutePosition.X) / math.max(tlBar.AbsoluteSize.X, 1), 0, 1)
+    pcall(function() t.TimePosition = p * t.Length end)
+    posTl(p, t)
+end
+
+tlBar.InputBegan:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+        sliderAtivo = updTl
+        updTl(inp.Position.X)
+    end
+end)
+local cTlEnd = UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        arrastandoTl = false
+    end
+end)
+
+btnPause.MouseButton1Click:Connect(function() pausado = not pausado aplicarVel() render() end)
+btn2x.MouseButton1Click:Connect(function() dobro = not dobro pausado = false aplicarVel() render() end)
+btn1x.MouseButton1Click:Connect(function() dobro, pausado = false, false aplicarVel() render() end)
+
+local cTime = game:GetService("RunService").Heartbeat:Connect(function()
+    if aba ~= "Poses" or arrastandoTl or not ctlPose.Visible then return end
+    local t = trilhaAtiva()
+    posTl(t and t.TimePosition / t.Length or 0, t)
+end)
+
 local function atualizar()
     if equipado then
         if espadas.R or espadas.L then colocarEspada() else desequipar() end
@@ -1904,18 +1991,24 @@ end
 
 render = function()
     info.Text = "Selecionado\nR: " .. (espadas.R or "-") .. "\nL: " .. (espadas.L or "-") .. (lDual and espadas.L and " (Dual)" or "")
-        .. "\nPose: " .. (poseOn and nomePose() or "Idle (desligada)") .. (estilo3 and "  |  Cabeça: on" or "")
+        .. "\nPose: " .. (poseOn and nomePose() or "Idle (desligada)") .. (travarPose and "  |  Travada" or "") .. (estilo3 and "  |  Cabeça: on" or "")
     pinta(tabE, aba == "Espadas") pinta(tabP, aba == "Poses") pinta(tabD, aba == "Duals") pinta(tabC, aba == "Cores")
     corRow.Visible = aba == "Cores"
     busca.Visible = aba ~= "Cores"
     for k, b in pairs(btnCor) do pinta(b, corMao == k) end
-    setEquip(equipado) setPoseSw(poseOn)
+    setEquip(equipado) setPoseSw(poseOn) setTravarSw(travarPose)
     rowEquip.Visible = aba ~= "Poses"
     rowPose.Visible = aba == "Poses"
+    rowTravar.Visible = aba == "Poses"
     handsRow.Visible = aba == "Espadas"
     btn3.Visible = aba == "Espadas"
     btnClicks.Visible = aba == "Espadas"
     btnPoseEsp.Visible = aba == "Poses"
+    ctlPose.Visible = aba == "Poses"
+    btnPause.Text = pausado and ">  Despausar" or "II  Pausar"
+    pinta(btnPause, pausado)
+    pinta(btn2x, dobro and not pausado)
+    pinta(btn1x, not dobro and not pausado)
 
     btn3.Text = (estilo3 and "[x] " or "[ ] ") .. "Espada na cabeça"
     pinta(btn3, estilo3)
@@ -1987,6 +2080,7 @@ getgenv().FakeSwordUnload = function()
     cDefl:Disconnect() cVigiaDefl:Disconnect() cEspChar:Disconnect() cChar:Disconnect()
     cDrag1:Disconnect() cDrag2:Disconnect() cDrag3:Disconnect()
     cSl1:Disconnect() cSl2:Disconnect()
+    cTime:Disconnect() cTlEnd:Disconnect()
     pararPoseEsp() desequipar() gui:Destroy()
 end
 render()
